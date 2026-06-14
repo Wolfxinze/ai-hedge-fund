@@ -19,6 +19,7 @@ from src.data.models import (
     PriceResponse,
 )
 from src.data.providers.base import FinancialDataProvider
+from src.data.providers.exceptions import ProviderFetchError
 
 _cache = get_cache()
 
@@ -28,10 +29,13 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
     Make an API request with rate-limit handling and moderate backoff.
     """
     for attempt in range(max_retries + 1):
-        if method.upper() == "POST":
-            response = requests.post(url, headers=headers, json=json_data)
-        else:
-            response = requests.get(url, headers=headers)
+        try:
+            if method.upper() == "POST":
+                response = requests.post(url, headers=headers, json=json_data)
+            else:
+                response = requests.get(url, headers=headers)
+        except requests.RequestException as exc:
+            raise ProviderFetchError(f"financialdatasets request error: {url}") from exc
 
         if response.status_code == 429 and attempt < max_retries:
             delay = 60 + (30 * attempt)
@@ -63,12 +67,12 @@ class FinancialDatasetsProvider(FinancialDataProvider):
         url = f"https://api.financialdatasets.ai/prices/?ticker={ticker}&interval=day&interval_multiplier=1&start_date={start_date}&end_date={end_date}"
         response = _make_api_request(url, self._headers(api_key))
         if response.status_code != 200:
-            return []
+            raise ProviderFetchError(f"financialdatasets request failed for {ticker}: HTTP {response.status_code}")
 
         try:
             prices = PriceResponse(**response.json()).prices
-        except Exception:
-            return []
+        except Exception as exc:
+            raise ProviderFetchError(f"financialdatasets response parse failed for {ticker}") from exc
 
         if not prices:
             return []
@@ -92,12 +96,12 @@ class FinancialDatasetsProvider(FinancialDataProvider):
         url = f"https://api.financialdatasets.ai/financial-metrics/?ticker={ticker}&report_period_lte={end_date}&limit={limit}&period={period}"
         response = _make_api_request(url, self._headers(api_key))
         if response.status_code != 200:
-            return []
+            raise ProviderFetchError(f"financialdatasets request failed for {ticker}: HTTP {response.status_code}")
 
         try:
             financial_metrics = FinancialMetricsResponse(**response.json()).financial_metrics
-        except Exception:
-            return []
+        except Exception as exc:
+            raise ProviderFetchError(f"financialdatasets response parse failed for {ticker}") from exc
 
         if not financial_metrics:
             return []
@@ -124,12 +128,12 @@ class FinancialDatasetsProvider(FinancialDataProvider):
         }
         response = _make_api_request(url, self._headers(api_key), method="POST", json_data=body)
         if response.status_code != 200:
-            return []
+            raise ProviderFetchError(f"financialdatasets request failed for {ticker}: HTTP {response.status_code}")
 
         try:
             search_results = LineItemResponse(**response.json()).search_results
-        except Exception:
-            return []
+        except Exception as exc:
+            raise ProviderFetchError(f"financialdatasets response parse failed for {ticker}") from exc
 
         if not search_results:
             return []
@@ -160,12 +164,12 @@ class FinancialDatasetsProvider(FinancialDataProvider):
 
             response = _make_api_request(url, self._headers(api_key))
             if response.status_code != 200:
-                break
+                raise ProviderFetchError(f"financialdatasets request failed for {ticker}: HTTP {response.status_code}")
 
             try:
                 insider_trades = InsiderTradeResponse(**response.json()).insider_trades
-            except Exception:
-                break
+            except Exception as exc:
+                raise ProviderFetchError(f"financialdatasets response parse failed for {ticker}") from exc
 
             if not insider_trades:
                 break
@@ -209,12 +213,12 @@ class FinancialDatasetsProvider(FinancialDataProvider):
 
             response = _make_api_request(url, self._headers(api_key))
             if response.status_code != 200:
-                break
+                raise ProviderFetchError(f"financialdatasets request failed for {ticker}: HTTP {response.status_code}")
 
             try:
                 company_news = CompanyNewsResponse(**response.json()).news
-            except Exception:
-                break
+            except Exception as exc:
+                raise ProviderFetchError(f"financialdatasets response parse failed for {ticker}") from exc
 
             if not company_news:
                 break
@@ -239,13 +243,12 @@ class FinancialDatasetsProvider(FinancialDataProvider):
             url = f"https://api.financialdatasets.ai/company/facts/?ticker={ticker}"
             response = _make_api_request(url, self._headers(api_key))
             if response.status_code != 200:
-                print(f"Error fetching company facts: {ticker} - {response.status_code}")
-                return None
+                raise ProviderFetchError(f"financialdatasets company facts request failed for {ticker}: HTTP {response.status_code}")
 
             try:
                 return CompanyFactsResponse(**response.json()).company_facts.market_cap
-            except Exception:
-                return None
+            except Exception as exc:
+                raise ProviderFetchError(f"financialdatasets company facts parse failed for {ticker}") from exc
 
         financial_metrics = self.get_financial_metrics(ticker, end_date, api_key=api_key)
         if not financial_metrics:

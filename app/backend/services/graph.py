@@ -8,7 +8,7 @@ from app.backend.services.agent_service import create_agent_function
 from src.agents.portfolio_manager import portfolio_management_agent
 from src.agents.risk_manager import risk_management_agent
 from src.main import start
-from src.utils.analysts import ANALYST_CONFIG
+from src.utils.analysts import ANALYST_CONFIG, resilient_analyst_node
 from src.graph.state import AgentState
 
 
@@ -63,6 +63,9 @@ def create_graph(graph_nodes: list, graph_edges: list) -> StateGraph:
             
         node_name, node_func = analyst_nodes[base_agent_key]
         agent_function = create_agent_function(node_func, unique_agent_id)
+        # Node-boundary handler (PRD v4 §8.2/M3): a provider fetch error degrades
+        # this analyst for the run instead of aborting the whole backend graph.
+        agent_function = resilient_analyst_node(unique_agent_id, agent_function)
         graph.add_node(unique_agent_id, agent_function)
     
     # Add portfolio manager nodes and their corresponding risk managers

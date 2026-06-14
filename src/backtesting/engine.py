@@ -22,6 +22,7 @@ from src.tools.api import (
     get_financial_metrics,
     get_insider_trades,
 )
+from src.data.providers.exceptions import ProviderFetchError
 
 
 class BacktestEngine:
@@ -121,11 +122,15 @@ class BacktestEngine:
                             missing_data = True
                             break
                         current_prices[ticker] = float(price_data.iloc[-1]["close"])
+                    except ProviderFetchError:
+                        raise  # loud-fail: a data outage must not silently shorten the curve
                     except Exception:
                         missing_data = True
                         break
                 if missing_data:
                     continue
+            except ProviderFetchError:
+                raise
             except Exception:
                 continue
 
