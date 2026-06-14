@@ -87,6 +87,14 @@ def test_wrapper_does_not_catch_unrelated_errors():
     raise AssertionError("unrelated errors must still surface loudly")
 
 
+def test_wrapper_records_degraded_node_in_state():
+    # Feeds the pipeline's fetch_errors recording: a degraded node is captured in
+    # state so the consumer can mark the run partial instead of silently dropping it.
+    node = resilient_analyst_node("burry_agent", _raising_node)
+    out = node(_initial_state(["AAPL"]))
+    assert "burry_agent" in out["data"].get("degraded_analysts", [])
+
+
 # ── compiled-graph behavior (the real seam) ──────────────────────────────────
 
 def test_compiled_graph_with_failing_node_does_not_abort():

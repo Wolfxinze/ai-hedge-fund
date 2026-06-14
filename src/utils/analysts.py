@@ -261,6 +261,10 @@ def resilient_analyst_node(node_name, node_func):
             return node_func(state)
         except ProviderFetchError as exc:
             logger.warning("analyst node %s degraded — provider fetch failed: %s", node_name, exc)
+            # Record the degraded node so a consumer (e.g. the observing-pool
+            # pipeline) can surface it as a partial run rather than silently
+            # dropping the analyst. Generic key; ignored by consumers that don't read it.
+            state["data"].setdefault("degraded_analysts", []).append(node_name)
             return {"data": state["data"]}
 
     wrapped.__name__ = getattr(node_func, "__name__", node_name)
