@@ -17,6 +17,12 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 from app.backend.database.models import Base
+
+# Register the observing-pools / serenity / monitoring tables on the shared Base
+# so autogenerate sees them (PRD v4 §8.1 / F1 model-discovery). Without this import
+# Alembic would emit empty/incorrect migrations for the new feature tables.
+import src.storage.models  # noqa: F401,E402
+
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
