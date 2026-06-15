@@ -40,6 +40,11 @@ function LayoutContent() {
     openTab(tabData);
   };
 
+  const handleObservingPoolsClick = () => {
+    const tabData = TabService.createObservingPoolsTab();
+    openTab(tabData);
+  };
+
   // Add keyboard shortcuts for toggling sidebars and fit view
   useLayoutKeyboardShortcuts(
     () => setIsRightCollapsed(!isRightCollapsed), // Cmd+I for right sidebar
@@ -91,6 +96,7 @@ function LayoutContent() {
         onToggleRight={() => setIsRightCollapsed(!isRightCollapsed)}
         onToggleBottom={toggleBottomPanel}
         onSettingsClick={handleSettingsClick}
+        onObservingPoolsClick={handleObservingPoolsClick}
       />
 
       {/* Tab Bar - positioned absolutely like bottom panel */}

@@ -1,10 +1,11 @@
+import { ObservingPoolsView } from '@/components/observing-pools/observing-pools-view';
 import { Settings } from '@/components/settings/settings';
 import { FlowTabContent } from '@/components/tabs/flow-tab-content';
 import { Flow } from '@/types/flow';
 import { ReactNode, createElement } from 'react';
 
 export interface TabData {
-  type: 'flow' | 'settings';
+  type: 'flow' | 'settings' | 'observing-pools';
   title: string;
   flow?: Flow;
   metadata?: Record<string, any>;
@@ -21,7 +22,10 @@ export class TabService {
       
       case 'settings':
         return createElement(Settings);
-      
+
+      case 'observing-pools':
+        return createElement(ObservingPoolsView);
+
       default:
         throw new Error(`Unsupported tab type: ${tabData.type}`);
     }
@@ -44,6 +48,14 @@ export class TabService {
     };
   }
 
+  static createObservingPoolsTab(): TabData & { content: ReactNode } {
+    return {
+      type: 'observing-pools',
+      title: 'Observing Pools',
+      content: TabService.createTabContent({ type: 'observing-pools', title: 'Observing Pools' }),
+    };
+  }
+
   // Restore tab content for persisted tabs (used when loading from localStorage)
   static restoreTabContent(tabData: TabData): ReactNode {
     return TabService.createTabContent(tabData);
@@ -60,7 +72,10 @@ export class TabService {
       
       case 'settings':
         return TabService.createSettingsTab();
-      
+
+      case 'observing-pools':
+        return TabService.createObservingPoolsTab();
+
       default:
         throw new Error(`Cannot restore unsupported tab type: ${savedTab.type}`);
     }

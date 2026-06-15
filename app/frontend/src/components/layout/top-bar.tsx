@@ -1,7 +1,7 @@
 import { Button } from '@/components/ui/button';
 import { useI18n } from '@/i18n/use-i18n';
 import { cn } from '@/lib/utils';
-import { Languages, PanelBottom, PanelLeft, PanelRight, Settings } from 'lucide-react';
+import { ChartLine, Languages, PanelBottom, PanelLeft, PanelRight, Settings } from 'lucide-react';
 
 interface TopBarProps {
   isLeftCollapsed: boolean;
@@ -11,6 +11,7 @@ interface TopBarProps {
   onToggleRight: () => void;
   onToggleBottom: () => void;
   onSettingsClick: () => void;
+  onObservingPoolsClick: () => void;
 }
 
 export function TopBar({
@@ -21,6 +22,7 @@ export function TopBar({
   onToggleRight,
   onToggleBottom,
   onSettingsClick,
+  onObservingPoolsClick,
 }: TopBarProps) {
   const { locale, t, toggleLocale } = useI18n();
   const currentLanguage = locale === 'zh-CN' ? t('language.chinese') : t('language.english');
@@ -100,6 +102,18 @@ export function TopBar({
         title={`${t('topBar.openSettings')} (⌘,)`}
       >
         <Settings size={16} />
+      </Button>
+
+      {/* Observing Pools */}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={onObservingPoolsClick}
+        className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground hover:bg-ramp-grey-700 transition-colors"
+        aria-label={t('topBar.openObservingPools')}
+        title={t('topBar.openObservingPools')}
+      >
+        <ChartLine size={16} />
       </Button>
     </div>
   );
