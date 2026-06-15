@@ -11,6 +11,7 @@ export const en = {
   'topBar.toggleBottomPanel': 'Toggle Bottom Panel',
   'topBar.toggleRightSidebar': 'Toggle Right Side Bar',
   'topBar.openSettings': 'Open Settings',
+  'topBar.openObservingPools': 'Open Observing Pools',
 
   'settings.title': 'Settings',
   'settings.apiKeys': 'API Keys',
@@ -345,6 +346,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'topBar.toggleBottomPanel': '切换底部面板',
   'topBar.toggleRightSidebar': '切换右侧边栏',
   'topBar.openSettings': '打开设置',
+  'topBar.openObservingPools': '打开观察池',
 
   'settings.title': '设置',
   'settings.apiKeys': 'API 密钥',
