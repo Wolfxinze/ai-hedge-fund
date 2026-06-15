@@ -50,18 +50,20 @@ def committee_analyst_keys() -> list[str]:
     return list(seen)
 
 
-def _safe_agent_score(raw: dict | None) -> tuple[float, bool]:
-    """One agent's {signal, confidence} → (0-100 score, degraded?).
+def _safe_agent_score(raw: dict | None) -> tuple[float, bool, str | None]:
+    """One agent's {signal, confidence} → (0-100 score, degraded?, reason).
 
-    Unknown/missing signal → neutral (score 50) + degraded=True.
+    Unknown/missing signal → neutral (score 50) + degraded=True. ``reason`` is
+    None when not degraded, ``"unknown_signal"`` for a missing/invalid signal,
+    or ``f"bad_confidence:{type-or-repr}"`` when scoring raises.
     """
     if not raw or raw.get("signal") not in _VALID_SIGNALS:
-        return 50.0, True
+        return 50.0, True, "unknown_signal"
     confidence = raw.get("confidence", 50)
     try:
-        return signal_to_score(raw["signal"], confidence), False
+        return signal_to_score(raw["signal"], confidence), False, None
     except (ValueError, TypeError):
-        return 50.0, True
+        return 50.0, True, f"bad_confidence:{confidence!r}"
 
 
 def component_scores(
@@ -85,7 +87,7 @@ def component_scores(
             raw = analyst_signals.get(f"{key}_agent", {}).get(ticker)
             if raw is None:
                 continue  # agent not run / no signal for this ticker → omit (not zero)
-            score, degraded = _safe_agent_score(raw)
+            score, degraded, degraded_reason = _safe_agent_score(raw)
             if not degraded:
                 scores.append(score)  # degraded → recorded below but excluded from the mean
             per_agent[key] = {
@@ -93,6 +95,7 @@ def component_scores(
                 "confidence": raw.get("confidence"),
                 "score": round(score, 2),
                 "degraded": degraded,
+                "degraded_reason": degraded_reason,
             }
         value = mean_or_none(scores)
         components[component] = value

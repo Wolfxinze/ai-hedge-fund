@@ -12,7 +12,7 @@ def _sig(signal, confidence=100):
 
 def test_degraded_agent_excluded_from_component_mean():
     signals = {
-        "cathie_wood_agent": {"X": _sig("bullish", 100)},          # real → 100
+        "cathie_wood_agent": {"X": _sig("bullish", 100)},  # real → 100
         "growth_analyst_agent": {"X": _sig("not-a-signal", 100)},  # degraded → excluded
     }
     comps, breakdown = component_scores(signals, "X", platform_fit_score=80.0)
@@ -38,11 +38,15 @@ def test_degraded_does_not_produce_a_misleading_50():
         {"cathie_wood_agent": {"X": _sig("bad")}, "growth_analyst_agent": {"X": _sig("bad")}},
         "X",
         platform_fit_score=None,
-    )[0]["innovation_growth"]
+    )[
+        0
+    ]["innovation_growth"]
     bearish = component_scores(
         {"cathie_wood_agent": {"Y": _sig("bearish")}, "growth_analyst_agent": {"Y": _sig("bearish")}},
         "Y",
         platform_fit_score=None,
-    )[0]["innovation_growth"]
+    )[
+        0
+    ]["innovation_growth"]
     assert degraded is None  # excluded entirely
-    assert bearish == 0.0    # real bearish, not masked by a fake 50
+    assert bearish == 0.0  # real bearish, not masked by a fake 50

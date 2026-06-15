@@ -50,13 +50,7 @@ def list_platforms(db: Session = Depends(get_db)) -> list[dict]:
 def get_pool(platform_key: str, db: Session = Depends(get_db)) -> dict:
     if platform_key not in PLATFORM_KEYS:
         raise HTTPException(status_code=404, detail=f"unknown platform '{platform_key}'")
-    ranked = (
-        db.query(ObservationPoolEntry)
-        .filter_by(platform_key=platform_key)
-        .filter(ObservationPoolEntry.rank.isnot(None))
-        .order_by(ObservationPoolEntry.rank)
-        .all()
-    )
+    ranked = db.query(ObservationPoolEntry).filter_by(platform_key=platform_key).filter(ObservationPoolEntry.rank.isnot(None)).order_by(ObservationPoolEntry.rank).all()
     return {"platform_key": platform_key, "count": len(ranked), "entries": [_entry_to_dict(e) for e in ranked]}
 
 
@@ -65,11 +59,17 @@ def get_serenity(ticker: str, db: Session = Depends(get_db)) -> list[dict]:
     records = db.query(SerenityResearchRecord).filter_by(ticker=ticker.upper()).order_by(SerenityResearchRecord.id.desc()).all()
     return [
         {
-            "id": r.id, "ticker": r.ticker, "platform_key": r.platform_key, "theme": r.theme,
-            "chain_layer": r.chain_layer, "bottleneck_hypothesis": r.bottleneck_hypothesis,
-            "evidence_grade": r.evidence_grade, "serenity_score": r.serenity_score,
+            "id": r.id,
+            "ticker": r.ticker,
+            "platform_key": r.platform_key,
+            "theme": r.theme,
+            "chain_layer": r.chain_layer,
+            "bottleneck_hypothesis": r.bottleneck_hypothesis,
+            "evidence_grade": r.evidence_grade,
+            "serenity_score": r.serenity_score,
             "recommended_action": r.recommended_action,
-            "disclaimer": r.disclaimer, "disclaimer_version": r.disclaimer_version,
+            "disclaimer": r.disclaimer,
+            "disclaimer_version": r.disclaimer_version,
         }
         for r in records
     ]

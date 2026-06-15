@@ -110,6 +110,18 @@ def test_unknown_platform_404(client):
     assert client.get("/observing-pools/not_a_platform").status_code == 404
 
 
+def test_serenity_research_lowercased_ticker(client):
+    resp = client.get("/serenity/research/nvda")  # lowercase → route .upper() normalizes
+    assert resp.status_code == 200
+    records = resp.json()
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["ticker"] == "NVDA"
+    assert rec["disclaimer"] and rec["disclaimer_version"]  # invariant survives to the API
+    assert rec["evidence_grade"] is not None
+    assert rec["serenity_score"] is not None
+
+
 def test_reports_carry_disclaimer(client):
     resp = client.get("/opportunity-reports")
     assert resp.status_code == 200

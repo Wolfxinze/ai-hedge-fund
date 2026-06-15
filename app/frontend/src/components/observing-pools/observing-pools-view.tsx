@@ -36,6 +36,12 @@ interface OpportunityReport {
 
 const fmt = (v: number | null | undefined): string => (v == null ? '—' : v.toFixed(0));
 
+const fetchJson = async (url: string): Promise<any> => {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+};
+
 export function ObservingPoolsView() {
   const { t, locale, toggleLocale } = useI18n();
   const [platform, setPlatform] = useState<string>('ai');
@@ -49,8 +55,8 @@ export function ObservingPoolsView() {
     setLoading(true);
     setError(false);
     Promise.all([
-      fetch(`${API_BASE_URL}/observing-pools/${platform}`).then((r) => r.json()),
-      fetch(`${API_BASE_URL}/opportunity-reports`).then((r) => r.json()),
+      fetchJson(`${API_BASE_URL}/observing-pools/${platform}`),
+      fetchJson(`${API_BASE_URL}/opportunity-reports`),
     ])
       .then(([pool, reps]) => {
         if (cancelled) return;

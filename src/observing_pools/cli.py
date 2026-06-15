@@ -8,6 +8,7 @@ Research-only: prints ranked pools, never trade instructions.
 """
 
 import argparse
+import sys
 from datetime import date
 from functools import partial
 
@@ -15,9 +16,23 @@ from src.observing_pools.pipeline import RefreshConfig, refresh_pool
 from src.observing_pools.platforms import PLATFORM_KEYS, init_platforms
 from src.observing_pools.universe import load_seed_csv, upsert_candidates
 from src.storage import engine, session_scope
-from src.storage.models import Base, ObservationPoolEntry
+from src.storage.models import Base, ObservationPoolEntry, RefreshRunStatus
 
 DEFAULT_UNIVERSE = "data/universes/ai_seed.csv"
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {parsed}")
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"must be non-negative, got {parsed}")
+    return parsed
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -51,7 +66,15 @@ def _cmd_refresh(args: argparse.Namespace) -> int:
         print(f"refresh status={run.status} platform={args.platform} " f"ranked={summary.get('ranked')} unavailable={summary.get('data_unavailable')} " f"dry_run={args.dry_run}")
         if summary.get("top_tickers"):
             print("top:", ", ".join(summary["top_tickers"]))
-    return 0 if run.status != "error" else 1
+        status, error = run.status, run.error
+    if error:
+        print(error, file=sys.stderr)
+    # Loud at the automation boundary: surface PARTIAL (over-budget/degraded) and ERROR.
+    return {
+        RefreshRunStatus.COMPLETE.value: 0,
+        RefreshRunStatus.PARTIAL.value: 2,
+        RefreshRunStatus.ERROR.value: 1,
+    }.get(status, 1)
 
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
@@ -79,8 +102,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ref = sub.add_parser("refresh", help="rank a platform pool via the analyst committee")
     p_ref.add_argument("--platform", required=True, choices=PLATFORM_KEYS)
     p_ref.add_argument("--universe", default=DEFAULT_UNIVERSE)
-    p_ref.add_argument("--top", type=int, default=20)
-    p_ref.add_argument("--budget", type=int, default=None, help="max analyst-call proxy before partial")
+    p_ref.add_argument("--top", type=_positive_int, default=20)
+    p_ref.add_argument("--budget", type=_non_negative_int, default=None, help="max analyst-call proxy before partial")
     p_ref.add_argument("--end-date", default=date.today().isoformat())
     p_ref.add_argument("--model", default="gpt-4.1")
     p_ref.add_argument("--provider", default="OpenAI")

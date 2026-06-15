@@ -44,8 +44,8 @@ class AgentSignal(StrEnum):
 def signal_to_score(signal: "AgentSignal | str", confidence: float) -> float:
     """0-100 attractiveness. neutral→50; full-confidence bullish→100; bearish→0.
 
-    Confidence is clamped to [0, 100] to tolerate int|float and the technicals
-    0-1 range (scaled to 0-100 at the dict layer; the clamp is the safety net).
+    Analyst agents already emit confidence on a 0-100 scale, so the clamp to
+    [0, 100] is purely a safety net against malformed or out-of-range inputs.
     A signal outside the three valid values raises — callers must map unknown/
     degraded outputs to ``neutral`` *before* calling (PRD §8.3 safe-default).
     """
@@ -71,6 +71,9 @@ def validate_weights(weights: Mapping[str, float]) -> None:
     for req in REQUIRED:
         if weights.get(req, 0.0) <= 0:
             raise ValueError(f"REQUIRED component '{req}' must have weight > 0")
+    missing = set(COMPONENT_WEIGHTS) - set(weights)
+    if missing:
+        raise ValueError(f"weights missing component keys: {sorted(missing)}")
 
 
 def build_components(

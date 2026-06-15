@@ -65,7 +65,28 @@ class TestMeanOrNone:
 
 class TestValidateWeights:
     def test_valid_passes(self):
-        validate_weights({"platform_fit": 0.25, "value_investor": 0.30, "x": 0.45})
+        validate_weights(
+            {
+                "platform_fit": 0.25,
+                "value_investor": 0.30,
+                "innovation_growth": 0.20,
+                "risk_adjusted_momentum": 0.10,
+                "serenity_bottleneck": 0.15,
+            }
+        )
+
+    def test_missing_component_key_rejected(self):
+        # Omitting a non-REQUIRED key must fail loudly here, not crash later
+        # with a KeyError when build_components indexes weights[k].
+        with pytest.raises(ValueError):
+            validate_weights(
+                {
+                    "platform_fit": 0.25,
+                    "value_investor": 0.30,
+                    "risk_adjusted_momentum": 0.10,
+                    "serenity_bottleneck": 0.15,
+                }
+            )
 
     def test_out_of_range_rejected(self):
         with pytest.raises(ValueError):

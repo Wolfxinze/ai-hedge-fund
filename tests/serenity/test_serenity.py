@@ -11,10 +11,10 @@ from sqlalchemy.orm import sessionmaker
 
 import src.storage.models as m
 from src.serenity.evidence import classify_reference, is_substantiated, source_type_for_host
-from src.serenity.grading import EvidenceGrade, grade_evidence, serenity_score
+from src.serenity.grading import EvidenceGrade, grade_evidence, normalize_scorecard, recommended_action, serenity_score
 from src.serenity.integrate import apply_serenity_to_pool
 from src.serenity.research import build_record
-from src.storage.models import SourceType
+from src.storage.models import RecommendedAction, SourceType
 
 
 @pytest.fixture
@@ -78,6 +78,27 @@ def test_serenity_score_gated_by_min_grade():
     assert serenity_score(full, EvidenceGrade.A) == 100.0
     assert serenity_score(full, EvidenceGrade.F) is None
     assert serenity_score(full, EvidenceGrade.D, min_grade=EvidenceGrade.C) is None  # D < C → withheld
+
+
+@pytest.mark.parametrize(
+    "score,grade,expected",
+    [
+        (None, EvidenceGrade.F, RecommendedAction.DEMOTE),  # withheld + F → demote
+        (70.0, EvidenceGrade.A, RecommendedAction.PROMOTE),  # strong grade + high score → promote
+        (50.0, EvidenceGrade.B, RecommendedAction.HOLD),  # grade ok but score < 60 → hold
+        (70.0, EvidenceGrade.C, RecommendedAction.HOLD),  # high score but grade < B → hold
+    ],
+)
+def test_recommended_action_branches(score, grade, expected):
+    assert recommended_action(score, grade) == expected
+
+
+def test_normalize_scorecard_clamps_and_defaults_missing():
+    # Partial scorecard: out-of-range 9 clamps to 4, negative clamps to 0, the two
+    # unmentioned dimensions default to 0. Raw = 4 + 0 + 3 = 7 over max 20 → 35.0.
+    raw7 = {"supplier_concentration": 9, "validation_cycle": -2, "capacity_expansion": 3}
+    assert normalize_scorecard(raw7) == pytest.approx(7 / 20 * 100.0)
+    assert normalize_scorecard({}) == 0.0  # all dimensions missing → 0
 
 
 # ── record persistence ──────────────────────────────────────────────────────
@@ -157,3 +178,22 @@ def test_some_graded_imputes_median_and_reranks(session):
     assert entries["T2"].composite_score == pytest.approx(67.5)
     assert entries["T3"].composite_score == pytest.approx(61.5)
     assert entries["T1"].rank == 1 and entries["T2"].rank == 2 and entries["T3"].rank == 3
+
+
+def test_required_missing_resets_to_data_unavailable(session):
+    # Stale state: a REQUIRED component (value_investor) is missing, yet the entry
+    # still carries a rank + CANDIDATE status from a prior refresh. apply_serenity
+    # must recompute composite=None → strip the rank and flag data_unavailable.
+    stale = _entry("T1", 90, None, 70, 60)
+    stale.rank = 1
+    stale.status = m.PoolEntryStatus.CANDIDATE.value
+    session.add(stale)
+    session.commit()
+
+    apply_serenity_to_pool(session, "ai")
+    session.commit()
+
+    e = session.query(m.ObservationPoolEntry).filter_by(ticker="T1").one()
+    assert e.composite_score is None  # REQUIRED missing → not rankable
+    assert e.rank is None
+    assert e.status == m.PoolEntryStatus.DATA_UNAVAILABLE.value

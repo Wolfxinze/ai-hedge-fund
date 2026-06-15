@@ -10,6 +10,7 @@ The ``run_analysts`` callable is injected: production passes
 deterministic stub (no network, no spend).
 """
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Protocol
@@ -48,12 +49,12 @@ class RefreshConfig:
     formula_version: str = FORMULA_4COMP
     classify_min_confidence: float = 0.3
     token_budget: int | None = None  # max analyst "calls" proxy; None = unbounded
-    selected_analysts: list[str] | None = None  # None → full blended committee
+    selected_analysts: Sequence[str] | None = None  # None → full blended committee
     dry_run: bool = False
-    weights: dict = field(default_factory=lambda: dict(COMPONENT_WEIGHTS))
+    weights: Mapping[str, float] = field(default_factory=lambda: dict(COMPONENT_WEIGHTS))
 
 
-@dataclass
+@dataclass(frozen=True)
 class ScoredCandidate:
     ticker: str
     composite_score: float | None

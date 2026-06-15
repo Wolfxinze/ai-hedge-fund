@@ -10,9 +10,12 @@ The classifier output feeds ``platform_fit_score`` (= confidence * 100) in the
 scoring composite (PRD §11.2).
 """
 
+import re
 from dataclasses import dataclass
 
 from src.observing_pools.platforms import PLATFORM_BY_KEY, PLATFORM_KEYS, PlatformDef
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 # Confidence assigned to a curated seed label (high, but not certain — keeps room
 # for human review before auto-promotion to ``active``, PRD §9.5).
@@ -31,8 +34,17 @@ class ClassificationResult:
 
 
 def _keyword_confidence(text: str, platform: PlatformDef) -> tuple[float, list[str]]:
-    """Count distinct keyword hits in ``text`` for one platform → (confidence, hits)."""
-    hits = [kw for kw in platform.keywords if kw in text]
+    """Count distinct keyword hits in ``text`` for one platform → (confidence, hits).
+
+    Matching is token-aware: phrases containing a space or hyphen ("machine
+    learning", "self-driving") match as substrings, but single alphanumeric seeds
+    ("ai", "ev", "cell") require whole-word equality so they don't fire inside
+    unrelated words ("retail", "revenue", "excellent").
+    """
+    words = set(_TOKEN_RE.findall(text))
+    # Pure single-token seeds need whole-word equality; seeds with a space/hyphen
+    # ("data center", "self-driving") are phrases matched by substring.
+    hits = [kw for kw in platform.keywords if (kw in words if _TOKEN_RE.fullmatch(kw) else kw in text)]
     if not hits:
         return 0.0, []
     conf = min(_KW_CAP, _KW_BASE + _KW_PER_HIT * len(hits))
