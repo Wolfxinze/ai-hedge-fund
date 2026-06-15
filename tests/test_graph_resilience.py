@@ -60,6 +60,7 @@ def _raising_node(state):
 
 # ── wrapper unit behavior ────────────────────────────────────────────────────
 
+
 def test_wrapper_passes_through_on_success():
     node = resilient_analyst_node("x_agent", _healthy_node("x_agent", "bearish"))
     out = node(_initial_state(["MSFT"]))
@@ -97,6 +98,7 @@ def test_wrapper_records_degraded_node_in_state():
 
 # ── compiled-graph behavior (the real seam) ──────────────────────────────────
 
+
 def test_compiled_graph_with_failing_node_does_not_abort():
     graph = _build_graph([("burry_agent", _raising_node)])
     final = graph.invoke(_initial_state(["AAPL"]))  # must NOT raise
@@ -107,3 +109,24 @@ def test_compiled_graph_healthy_node_still_scores():
     graph = _build_graph([("buffett_agent", _healthy_node("buffett_agent", "bullish"))])
     final = graph.invoke(_initial_state(["AAPL"]))
     assert final["data"]["analyst_signals"]["buffett_agent"]["AAPL"]["signal"] == "bullish"
+
+
+def test_compiled_graph_records_degraded_node_in_state():
+    """The real seam (not just the wrapper called directly): a failing node, run
+    through a COMPILED graph, must surface in final data['degraded_analysts'] —
+    this is what the observing-pool consumer reads to mark a refresh PARTIAL."""
+    graph = _build_graph([("burry_agent", _raising_node)])
+    final = graph.invoke(_initial_state(["AAPL"]))
+    assert "burry_agent" in final["data"].get("degraded_analysts", [])
+
+
+def test_compiled_graph_accumulates_multiple_degraded_nodes():
+    """Two analysts fail in the same fan-out super-step — BOTH must be recorded.
+    The data channel reducer must accumulate degraded_analysts, not drop one;
+    otherwise a multi-provider outage understates the degradation and a run that
+    should be PARTIAL could look less degraded than it is."""
+    graph = _build_graph([("burry_agent", _raising_node), ("munger_agent", _raising_node)])
+    final = graph.invoke(_initial_state(["AAPL"]))
+    degraded = final["data"].get("degraded_analysts", [])
+    assert "burry_agent" in degraded, f"burry missing from {degraded}"
+    assert "munger_agent" in degraded, f"munger missing from {degraded}"
