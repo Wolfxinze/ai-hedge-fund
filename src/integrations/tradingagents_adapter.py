@@ -24,6 +24,14 @@ TA_PROJECT = os.environ.get("TRADINGAGENTS_PROJECT")
 TA_RUNNER = os.path.join(TA_PROJECT, "tradingagents_runner.py") if TA_PROJECT else None
 DEFAULT_TIMEOUT = int(os.environ.get("TRADINGAGENTS_TIMEOUT", "900"))
 _TICKER_RE = re.compile(r"[A-Za-z0-9.\-]{1,16}")
+# Only these override keys are forwarded to TradingAgents — never path/url keys like
+# results_dir/data_dir/backend_url (mass-assignment / SSRF). Enforced here AND in the
+# runner (defense in depth).
+_ALLOWED_OVERRIDE_KEYS = frozenset({"deep_think_llm", "quick_think_llm", "max_debate_rounds", "online_tools"})
+
+
+def _filter_overrides(overrides: dict | None) -> dict:
+    return {k: v for k, v in (overrides or {}).items() if k in _ALLOWED_OVERRIDE_KEYS}
 
 # TradingAgents rating → descriptive ReportLabel (never the raw buy/sell word).
 _RATING_TO_LABEL: dict[str, ReportLabel] = {
@@ -110,7 +118,7 @@ def run_analyzing_flow(
     if not TA_RUNNER or not os.path.exists(TA_RUNNER):
         return _degraded(ticker, "TRADINGAGENTS_PROJECT not set or runner not found")
 
-    request = json.dumps({"ticker": ticker, "trade_date": trade_date, "asset_type": asset_type, "config_overrides": config_overrides or {}})
+    request = json.dumps({"ticker": ticker, "trade_date": trade_date, "asset_type": asset_type, "config_overrides": _filter_overrides(config_overrides)})
     try:
         proc = subprocess.run(
             ["uv", "run", "--project", TA_PROJECT, "python", TA_RUNNER],
