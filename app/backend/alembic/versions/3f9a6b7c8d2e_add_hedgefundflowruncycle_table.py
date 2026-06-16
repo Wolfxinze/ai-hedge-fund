@@ -60,8 +60,9 @@ def upgrade():
             sa.Column('market_conditions', sa.JSON, nullable=True),
         )
         
-        # Create indexes for the new table
-        op.create_index('ix_hedge_fund_flow_run_cycles_flow_run_id', 'hedge_fund_flow_run_cycles', ['flow_run_id'])
+        # Create indexes for the new table. NOTE: flow_run_id's index is already
+        # auto-created by index=True on the column above; re-creating it here made
+        # a from-scratch `alembic upgrade` fail ("index already exists").
         op.create_index('ix_hedge_fund_flow_run_cycles_cycle_number', 'hedge_fund_flow_run_cycles', ['cycle_number'])
         op.create_index('ix_hedge_fund_flow_run_cycles_status', 'hedge_fund_flow_run_cycles', ['status'])
         op.create_index('ix_hedge_fund_flow_run_cycles_started_at', 'hedge_fund_flow_run_cycles', ['started_at'])
