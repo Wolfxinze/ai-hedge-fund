@@ -88,3 +88,31 @@ def test_run_monitor_persists_disclaimer_reports(session):
     assert by_ticker["BAD"]["label"] == ReportLabel.INSUFFICIENT_EVIDENCE.value
     # persisted
     assert session.query(m.OpportunityReport).count() == 2
+
+
+def test_run_monitor_surfaces_aggregate_degradation(session):
+    """A caller can cheaply tell a run had degradation without scanning each report."""
+
+    def stub_flow(ticker, trade_date):
+        if ticker == "BAD":
+            return AnalyzingFlowResult(ticker, ReportLabel.INSUFFICIENT_EVIDENCE, 0.0, True, "Analysis unavailable.")
+        return AnalyzingFlowResult(ticker, ReportLabel.THESIS_SUPPORTIVE, 70.0, False, f"{ticker} thesis intact", raw_decision="Buy")
+
+    monitor = create_monitor(session, name="AI weekly", tickers=["NVDA", "BAD"], granularity="weekly")
+    result = run_monitor(session, monitor, trade_date="2026-06-12", analyzing_flow=stub_flow)
+
+    assert result.degraded_count == 1
+    assert result.any_degraded is True
+
+
+def test_run_monitor_clean_run_reports_no_degradation(session):
+    """No degraded ticker → aggregate stays clean (mirrors a COMPLETE pool run)."""
+
+    def stub_flow(ticker, trade_date):
+        return AnalyzingFlowResult(ticker, ReportLabel.THESIS_SUPPORTIVE, 70.0, False, f"{ticker} thesis intact", raw_decision="Buy")
+
+    monitor = create_monitor(session, name="AI weekly", tickers=["NVDA", "TSLA"], granularity="weekly")
+    result = run_monitor(session, monitor, trade_date="2026-06-12", analyzing_flow=stub_flow)
+
+    assert result.degraded_count == 0
+    assert result.any_degraded is False

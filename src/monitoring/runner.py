@@ -29,6 +29,12 @@ class AnalyzingFlow(Protocol):
 class MonitorRunResult:
     monitor_name: str
     reports: list[dict]  # serialized (disclaimer-checked) reports
+    degraded_count: int = 0  # run-level aggregate; mirrors PoolRefreshRun.PARTIAL
+
+    @property
+    def any_degraded(self) -> bool:
+        """Cheap run-level degraded signal (a caller need not scan each report)."""
+        return self.degraded_count > 0
 
 
 def create_monitor(
@@ -64,6 +70,7 @@ def run_monitor(
     """Run the monitor once; persist one disclaimer-carrying report per ticker."""
     disclaimer, disclaimer_version = research_disclaimer()
     serialized: list[dict] = []
+    degraded_count = 0
 
     for ticker in monitor.tickers or []:
         try:
@@ -92,9 +99,11 @@ def run_monitor(
             disclaimer=disclaimer,
             disclaimer_version=disclaimer_version,
         )
+        if result.degraded:
+            degraded_count += 1
         session.add(report)
         session.flush()
         # Every emitted report flows through the chokepoint (raises if disclaimer missing).
         serialized.append(serialize_report(report))
 
-    return MonitorRunResult(monitor_name=monitor.name, reports=serialized)
+    return MonitorRunResult(monitor_name=monitor.name, reports=serialized, degraded_count=degraded_count)
