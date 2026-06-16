@@ -53,7 +53,12 @@ def test_migration_applies_roundtrips_and_matches_orm():
             migrated_cols = {c["name"] for c in insp.get_columns(t)}
             assert orm_cols == migrated_cols, f"{t}: ORM↔migration drift {orm_cols ^ migrated_cols}"
 
-        # Downgrade removes exactly the feature tables (proves downgrade() is correct).
-        command.downgrade(cfg, "-1")
+        # api_keys.provider index is unique after upgrade (issue #7 drift fix).
+        provider_idx = [ix for ix in insp.get_indexes("api_keys") if ix["column_names"] == ["provider"]]
+        assert provider_idx and provider_idx[0]["unique"], "api_keys.provider index should be unique"
+
+        # Downgrade to before the feature migration removes the feature tables (the
+        # chain now has the api_keys-unique migration on top of the feature one).
+        command.downgrade(cfg, "d5e78f9a1b2c")
         after = set(inspect(create_engine(url)).get_table_names())
         assert not (_FEATURE_TABLES & after), f"left behind after downgrade: {_FEATURE_TABLES & after}"
