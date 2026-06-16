@@ -64,6 +64,19 @@ def test_dropped_status_not_clobbered(session):
     assert dropped.rank is None
 
 
+def test_dropped_with_scores_excluded_from_ranking(session):
+    # A DROPPED entry that STILL has component scores (non-None composite) must not
+    # be ranked back into the pool — the half-guard previously gave it rank=1.
+    dropped = _entry("DROP", status=m.PoolEntryStatus.DROPPED.value)  # full scores
+    keep = _entry("KEEP")
+    session.add_all([dropped, keep])
+    session.flush()
+    apply_serenity_to_pool(session, "ai")
+    assert dropped.status == m.PoolEntryStatus.DROPPED.value
+    assert dropped.rank is None  # excluded from ranking despite a non-None composite
+    assert keep.rank == 1
+
+
 def test_single_graded_entry_imputes_its_value(session):
     # Exactly one graded entry → median == that single value, imputed to the ungraded entry.
     session.add_all([_entry("G"), _entry("U")])
