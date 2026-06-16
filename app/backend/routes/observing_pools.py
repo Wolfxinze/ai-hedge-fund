@@ -4,7 +4,9 @@ Loopback-bound (research-only). Every report is projected through
 ``serialize_report`` so the disclaimer invariant holds on the API surface too.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+import re
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.backend.database.connection import get_db
@@ -18,6 +20,10 @@ from src.storage.models import (
 )
 
 router = APIRouter()
+
+# Loose validation for untrusted ticker path params. Parameterized queries already
+# prevent SQLi; this rejects clearly-malformed input with a 422 rather than querying.
+_TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,16}$")
 
 
 def _entry_to_dict(e: ObservationPoolEntry) -> dict:
@@ -55,8 +61,10 @@ def get_pool(platform_key: str, db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/serenity/research/{ticker}")
-def get_serenity(ticker: str, db: Session = Depends(get_db)) -> list[dict]:
-    records = db.query(SerenityResearchRecord).filter_by(ticker=ticker.upper()).order_by(SerenityResearchRecord.id.desc()).all()
+def get_serenity(ticker: str, db: Session = Depends(get_db), limit: int = Query(50, ge=1, le=200)) -> list[dict]:
+    if not _TICKER_RE.match(ticker):
+        raise HTTPException(status_code=422, detail=f"invalid ticker '{ticker}'")
+    records = db.query(SerenityResearchRecord).filter_by(ticker=ticker.upper()).order_by(SerenityResearchRecord.id.desc()).limit(limit).all()
     return [
         {
             "id": r.id,
@@ -76,6 +84,6 @@ def get_serenity(ticker: str, db: Session = Depends(get_db)) -> list[dict]:
 
 
 @router.get("/opportunity-reports")
-def list_reports(db: Session = Depends(get_db), limit: int = 50) -> list[dict]:
+def list_reports(db: Session = Depends(get_db), limit: int = Query(50, ge=1, le=200)) -> list[dict]:
     reports = db.query(OpportunityReport).order_by(OpportunityReport.id.desc()).limit(limit).all()
     return [serialize_report(r) for r in reports]  # disclaimer invariant enforced here
