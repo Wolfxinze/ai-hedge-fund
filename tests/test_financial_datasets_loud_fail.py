@@ -48,3 +48,20 @@ def test_get_prices_raises_on_unparseable_200(monkeypatch):
     monkeypatch.setattr(_PATCH, lambda *a, **k: _Resp(200, {"unexpected": "shape"}))
     with pytest.raises(ProviderFetchError):
         provider.get_prices("FD_BADBODY", "2024-01-01", "2024-02-01")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda p: p.get_financial_metrics("ZZFD", "2024-02-01"),
+        lambda p: p.search_line_items("ZZFD", ["revenue"], "2024-02-01"),
+        lambda p: p.get_insider_trades("ZZFD", "2024-02-01"),
+        lambda p: p.get_company_news("ZZFD", "2024-02-01"),
+    ],
+)
+def test_all_fetch_methods_raise_on_non_200(monkeypatch, call):
+    """Gap-1: the loud-fail contract must hold for every fetch method, not just prices."""
+    provider = FinancialDatasetsProvider()
+    monkeypatch.setattr(_PATCH, lambda *a, **k: _Resp(500))
+    with pytest.raises(ProviderFetchError):
+        call(provider)

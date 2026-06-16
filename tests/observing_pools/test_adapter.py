@@ -28,6 +28,13 @@ def _fake_completed(returncode=0, stdout="", stderr=""):
     return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+@pytest.fixture(autouse=True)
+def _configured_runner(monkeypatch):
+    # The adapter no longer hardcodes a project path (it degrades when unset), so
+    # pin a dummy runner path; each test still patches os.path.exists as needed.
+    monkeypatch.setattr(adapter, "TA_RUNNER", "/tmp/ta_runner.py")
+
+
 def test_runner_missing_degrades(monkeypatch):
     monkeypatch.setattr(adapter.os.path, "exists", lambda p: False)
     result = run_analyzing_flow(TICKER, TRADE_DATE)

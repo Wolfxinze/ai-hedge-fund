@@ -67,8 +67,18 @@ def grade_evidence(refs: list[dict]) -> EvidenceGrade:
 
 
 def normalize_scorecard(scorecard: dict) -> float:
-    """Sum the five 0-4 dimensions → 0-100. Missing dimensions count as 0."""
-    raw = sum(min(_DIM_MAX, max(0, int(scorecard.get(dim, 0)))) for dim in SCORECARD_DIMENSIONS)
+    """Sum the five 0-4 dimensions → 0-100. Missing/invalid dimensions count as 0.
+
+    The scorecard is LLM-proposed (untrusted): a dimension may be absent, an
+    explicit null, or a non-numeric string. Coerce defensively rather than crash.
+    """
+    raw = 0
+    for dim in SCORECARD_DIMENSIONS:
+        try:
+            value = int(float(scorecard.get(dim) or 0))
+        except (TypeError, ValueError):
+            value = 0
+        raw += min(_DIM_MAX, max(0, value))
     return raw / (_DIM_MAX * len(SCORECARD_DIMENSIONS)) * 100.0
 
 

@@ -1,10 +1,14 @@
 """Helper functions for LLM"""
 
 import json
+import logging
+
 from pydantic import BaseModel
 from src.llm.models import get_model, get_model_info
 from src.utils.progress import progress
 from src.graph.state import AgentState
+
+logger = logging.getLogger(__name__)
 
 
 def call_llm(
@@ -74,7 +78,7 @@ def call_llm(
                 progress.update_status(agent_name, None, f"Error - retry {attempt + 1}/{max_retries}")
 
             if attempt == max_retries - 1:
-                print(f"Error in LLM call after {max_retries} attempts: {e}")
+                logger.error("LLM call failed after %d attempts: %s", max_retries, e)
                 # Use default_factory if provided, otherwise create a basic default
                 if default_factory:
                     return default_factory()
@@ -97,9 +101,13 @@ def create_default_response(model_class: type[BaseModel]) -> BaseModel:
         elif hasattr(field.annotation, "__origin__") and field.annotation.__origin__ == dict:
             default_values[field_name] = {}
         else:
-            # For other types (like Literal), try to use the first allowed value
+            # For other types (like Literal), prefer a NEUTRAL member if present —
+            # never blindly take __args__[0]. For signal models the first value is
+            # "bullish", so a failed LLM call would otherwise silently fabricate a
+            # bullish signal that the composite reads as real (PRD O1 / review C1).
             if hasattr(field.annotation, "__args__"):
-                default_values[field_name] = field.annotation.__args__[0]
+                args = field.annotation.__args__
+                default_values[field_name] = "neutral" if "neutral" in args else args[0]
             else:
                 default_values[field_name] = None
 
@@ -116,8 +124,8 @@ def extract_json_from_response(content: str) -> dict | None:
             if json_end != -1:
                 json_text = json_text[:json_end].strip()
                 return json.loads(json_text)
-    except Exception as e:
-        print(f"Error extracting JSON from response: {e}")
+    except json.JSONDecodeError as e:
+        logger.warning("Failed to parse JSON from LLM response: %s", e)
     return None
 
 

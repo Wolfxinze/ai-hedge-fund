@@ -13,14 +13,17 @@ the buy/sell wording is never surfaced (research-only posture, PRD §9.9).
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 
 from src.storage.models import ReportLabel
 
-TA_PROJECT = os.environ.get("TRADINGAGENTS_PROJECT", "/Users/laiyama/Stocks/TradingAgent")
-TA_RUNNER = os.path.join(TA_PROJECT, "tradingagents_runner.py")
+# No hardcoded path: the seam location must be configured. Absent → degraded result.
+TA_PROJECT = os.environ.get("TRADINGAGENTS_PROJECT")
+TA_RUNNER = os.path.join(TA_PROJECT, "tradingagents_runner.py") if TA_PROJECT else None
 DEFAULT_TIMEOUT = int(os.environ.get("TRADINGAGENTS_TIMEOUT", "900"))
+_TICKER_RE = re.compile(r"[A-Za-z0-9.\-]{1,16}")
 
 # TradingAgents rating → descriptive ReportLabel (never the raw buy/sell word).
 _RATING_TO_LABEL: dict[str, ReportLabel] = {
@@ -85,7 +88,7 @@ def map_runner_payload(ticker: str, payload: dict) -> AnalyzingFlowResult:
     return AnalyzingFlowResult(
         ticker=ticker,
         label=label,
-        confidence=_LABEL_CONFIDENCE[label],
+        confidence=_LABEL_CONFIDENCE.get(label, 0.0),
         degraded=False,
         summary=summary,
         raw_decision=decision,
@@ -102,8 +105,10 @@ def run_analyzing_flow(
     timeout: int = DEFAULT_TIMEOUT,
 ) -> AnalyzingFlowResult:
     """Run TradingAgents' debate graph for one ticker; degrade on any failure."""
-    if not os.path.exists(TA_RUNNER):
-        return _degraded(ticker, f"tradingagents runner not found at {TA_RUNNER}")
+    if not ticker or not _TICKER_RE.fullmatch(ticker):
+        return _degraded(ticker, "invalid ticker")
+    if not TA_RUNNER or not os.path.exists(TA_RUNNER):
+        return _degraded(ticker, "TRADINGAGENTS_PROJECT not set or runner not found")
 
     request = json.dumps({"ticker": ticker, "trade_date": trade_date, "asset_type": asset_type, "config_overrides": config_overrides or {}})
     try:

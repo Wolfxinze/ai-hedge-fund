@@ -6,6 +6,7 @@ persisting it. No scheduler yet (manual run); APScheduler is an expansion phase.
 Emits research reports, never orders.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -14,7 +15,9 @@ from sqlalchemy.orm import Session
 from src.compliance import research_disclaimer
 from src.integrations.tradingagents_adapter import AnalyzingFlowResult, run_analyzing_flow
 from src.monitoring.serialize import serialize_report
-from src.storage.models import Granularity, MonitorConfig, OpportunityReport
+from src.storage.models import Granularity, MonitorConfig, OpportunityReport, ReportLabel
+
+logger = logging.getLogger(__name__)
 
 
 class AnalyzingFlow(Protocol):
@@ -63,7 +66,18 @@ def run_monitor(
     serialized: list[dict] = []
 
     for ticker in monitor.tickers or []:
-        result = analyzing_flow(ticker, trade_date)
+        try:
+            result = analyzing_flow(ticker, trade_date)
+        except Exception as exc:  # one ticker's failure must not abort the whole monitor run
+            logger.warning("monitor %s: analyzing flow raised for %s: %s", monitor.name, ticker, exc)
+            result = AnalyzingFlowResult(
+                ticker=ticker,
+                label=ReportLabel.INSUFFICIENT_EVIDENCE,
+                confidence=0.0,
+                degraded=True,
+                summary="Analysis unavailable.",
+                error=str(exc),
+            )
         report = OpportunityReport(
             monitor_id=monitor.id,
             ticker=ticker,
