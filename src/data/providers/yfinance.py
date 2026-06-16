@@ -6,6 +6,7 @@ import pandas as pd
 from src.data.cache import get_cache
 from src.data.models import CompanyNews, FinancialMetrics, InsiderTrade, LineItem, Price
 from src.data.providers.base import FinancialDataProvider
+from src.data.providers.exceptions import ProviderFetchError
 
 _cache = get_cache()
 
@@ -147,8 +148,8 @@ class YFinanceProvider(FinancialDataProvider):
             history = self._ticker(ticker).history(start=start_date, end=end_dt.strftime("%Y-%m-%d"), auto_adjust=False)
         except RuntimeError:
             raise
-        except Exception:
-            return []
+        except Exception as exc:
+            raise ProviderFetchError(f"yfinance fetch failed for {ticker}") from exc
 
         if history is None or history.empty:
             return []
@@ -366,8 +367,8 @@ class YFinanceProvider(FinancialDataProvider):
             records = self._line_item_records(ticker, end_date, period, limit)
         except RuntimeError:
             raise
-        except Exception:
-            return []
+        except Exception as exc:
+            raise ProviderFetchError(f"yfinance fetch failed for {ticker}") from exc
 
         market_cap = self._market_cap_from_ticker(ticker_obj, info)
         metrics = []
@@ -463,8 +464,8 @@ class YFinanceProvider(FinancialDataProvider):
             records = self._line_item_records(ticker, end_date, period, limit, requested_items=line_items)
         except RuntimeError:
             raise
-        except Exception:
-            return []
+        except Exception as exc:
+            raise ProviderFetchError(f"yfinance fetch failed for {ticker}") from exc
 
         line_item_results = [LineItem(**record) for record in records]
         if line_item_results:
@@ -487,8 +488,8 @@ class YFinanceProvider(FinancialDataProvider):
             trades_df = self._ticker(ticker).insider_transactions
         except RuntimeError:
             raise
-        except Exception:
-            return []
+        except Exception as exc:
+            raise ProviderFetchError(f"yfinance fetch failed for {ticker}") from exc
 
         if trades_df is None or trades_df.empty:
             return []
@@ -561,8 +562,8 @@ class YFinanceProvider(FinancialDataProvider):
             items = self._ticker(ticker).news or []
         except RuntimeError:
             raise
-        except Exception:
-            return []
+        except Exception as exc:
+            raise ProviderFetchError(f"yfinance fetch failed for {ticker}") from exc
 
         start = _to_datetime(start_date)
         end = _to_datetime(end_date)
@@ -610,5 +611,5 @@ class YFinanceProvider(FinancialDataProvider):
             return self._historical_market_cap(ticker_obj, records[0])
         except RuntimeError:
             raise
-        except Exception:
-            return None
+        except Exception as exc:
+            raise ProviderFetchError(f"yfinance market cap fetch failed for {ticker}") from exc

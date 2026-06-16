@@ -1,5 +1,8 @@
 """Constants and utilities related to analysts configuration."""
 
+import logging
+
+from src.data.providers.exceptions import ProviderFetchError
 from src.agents import portfolio_manager
 from src.agents.aswath_damodaran import aswath_damodaran_agent
 from src.agents.ben_graham import ben_graham_agent
@@ -171,10 +174,114 @@ ANALYST_CONFIG = {
 # Derive ANALYST_ORDER from ANALYST_CONFIG for backwards compatibility
 ANALYST_ORDER = [(config["display_name"], key) for key, config in sorted(ANALYST_CONFIG.items(), key=lambda x: x[1]["order"])]
 
+ANALYST_ALIASES = {
+    "technical": "technical_analyst",
+    "technicals": "technical_analyst",
+    "technical_analysis": "technical_analyst",
+    "fundamental": "fundamentals_analyst",
+    "fundamentals": "fundamentals_analyst",
+    "sentiment": "sentiment_analyst",
+    "valuation": "valuation_analyst",
+    "growth": "growth_analyst",
+    "news": "news_sentiment_analyst",
+    "news_sentiment": "news_sentiment_analyst",
+}
+
+
+def normalize_analyst_key(analyst_key: str) -> str | None:
+    """Normalize CLI-friendly analyst names to internal analyst keys."""
+    normalized = analyst_key.strip().lower().replace("-", "_").replace(" ", "_")
+    if not normalized:
+        return None
+
+    if normalized in ANALYST_CONFIG:
+        return normalized
+
+    if normalized in ANALYST_ALIASES:
+        return ANALYST_ALIASES[normalized]
+
+    analyst_suffix_key = f"{normalized}_analyst"
+    if analyst_suffix_key in ANALYST_CONFIG:
+        return analyst_suffix_key
+
+    if normalized.endswith("s"):
+        singular = normalized[:-1]
+        if singular in ANALYST_ALIASES:
+            return ANALYST_ALIASES[singular]
+        singular_suffix_key = f"{singular}_analyst"
+        if singular_suffix_key in ANALYST_CONFIG:
+            return singular_suffix_key
+
+    return None
+
+
+def parse_analyst_keys(analysts_arg: str) -> tuple[list[str], list[str]]:
+    """Parse comma-separated analyst keys, returning normalized and invalid values."""
+    selected = []
+    invalid = []
+    seen = set()
+
+    for raw_key in analysts_arg.split(","):
+        raw_key = raw_key.strip()
+        if not raw_key:
+            continue
+
+        normalized = normalize_analyst_key(raw_key)
+        if not normalized:
+            invalid.append(raw_key)
+            continue
+
+        if normalized not in seen:
+            selected.append(normalized)
+            seen.add(normalized)
+
+    return selected, invalid
+
+
+logger = logging.getLogger(__name__)
+
+
+def resilient_analyst_node(node_name, node_func):
+    """Wrap an analyst node so a ``ProviderFetchError`` degrades that analyst for
+    the run instead of aborting the whole graph (PRD v4 §8.2 / M3 node-boundary
+    handler).
+
+    The loud-fail provider now raises on a fetch failure; without this boundary a
+    single transient outage would crash an entire ``run_hedge_fund`` or
+    observing-pool refresh. On catch the failure is logged loudly (never silent)
+    and the node contributes no signal — downstream already tolerates a missing
+    analyst (the composite omits absent components; the portfolio manager handles
+    missing signals). Granularity is per-node, not per-ticker: agents build their
+    signal dict in one pass and write it once, so the whole node is skipped. Only
+    ``ProviderFetchError`` is caught; genuine bugs still surface loudly.
+    """
+
+    def wrapped(state):
+        try:
+            return node_func(state)
+        except ProviderFetchError as exc:
+            logger.warning("analyst node %s degraded — provider fetch failed: %s", node_name, exc)
+            # Record the degraded node so a consumer (e.g. the observing-pool
+            # pipeline) can surface it as a partial run rather than silently
+            # dropping the analyst. Generic key; ignored by consumers that don't read it.
+            state["data"].setdefault("degraded_analysts", []).append(node_name)
+            return {"data": state["data"]}
+
+    wrapped.__name__ = getattr(node_func, "__name__", node_name)
+    return wrapped
+
 
 def get_analyst_nodes():
-    """Get the mapping of analyst keys to their (node_name, agent_func) tuples."""
-    return {key: (f"{key}_agent", config["agent_func"]) for key, config in ANALYST_CONFIG.items()}
+    """Get the mapping of analyst keys to their (node_name, agent_func) tuples.
+
+    Each agent func is wrapped with ``resilient_analyst_node`` so a provider fetch
+    error degrades that one analyst rather than aborting the graph (both the live
+    ``create_workflow`` and the scoring-only pipeline build nodes from here).
+    """
+    return {
+        key: (f"{key}_agent", resilient_analyst_node(f"{key}_agent", config["agent_func"]))
+        for key, config in ANALYST_CONFIG.items()
+    }
 
 
 def get_agents_list():

@@ -2,7 +2,7 @@ import { Button } from '@/components/ui/button';
 import { useTabsContext } from '@/contexts/tabs-context';
 import { useI18n } from '@/i18n/use-i18n';
 import { cn } from '@/lib/utils';
-import { FileText, Layout, Settings, X } from 'lucide-react';
+import { ChartLine, FileText, Layout, Settings, X } from 'lucide-react';
 import { ReactNode, useState } from 'react';
 
 interface TabBarProps {
@@ -16,6 +16,8 @@ const getTabIcon = (type: string): ReactNode => {
       return <FileText size={13} />;
     case 'settings':
       return <Settings size={13} />;
+    case 'observing-pools':
+      return <ChartLine size={13} />;
     default:
       return <Layout size={13} />;
   }
