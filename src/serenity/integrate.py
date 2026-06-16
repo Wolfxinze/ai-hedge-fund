@@ -63,7 +63,9 @@ def apply_serenity_to_pool(session: Session, platform_key: str) -> dict:
     for e in entries:
         if e.composite_score is None:
             e.rank = None
-            e.status = PoolEntryStatus.DATA_UNAVAILABLE.value
+            # Don't resurrect a manually DROPPED entry into data_unavailable.
+            if e.status != PoolEntryStatus.DROPPED.value:
+                e.status = PoolEntryStatus.DATA_UNAVAILABLE.value
 
     session.flush()
     return {"graded": len(graded), "median": pool_median, "reranked": len(rankable)}
