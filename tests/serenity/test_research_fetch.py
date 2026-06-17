@@ -77,3 +77,19 @@ def test_fetch_unexpected_error_isolated(session, monkeypatch):
     rec = build_record(session, theme="t", references=_refs(), scorecard={}, fetch_missing=True)  # must not raise
     session.commit()
     assert _evidence(session, rec).substantiated is False
+
+
+def test_fetched_excerpt_persisted_and_record_graded(session, monkeypatch):
+    monkeypatch.setattr(research, "fetch_excerpt", lambda url: FetchResult(True, _OVERLAP, "https://sec.gov/doc", 200, "text/html", "ok", 80))
+    rec = build_record(
+        session,
+        theme="t",
+        references=_refs(),
+        scorecard={"supplier_concentration": 4, "expansion_difficulty": 3},
+        fetch_missing=True,
+    )
+    session.commit()
+    ev = _evidence(session, rec)
+    assert ev.excerpt == _OVERLAP  # the FETCHED text is persisted to the column (not just its bool side-effect)
+    assert ev.substantiated is True
+    assert rec.evidence_grade is not None  # grade computed + persisted, not just the substantiated flag

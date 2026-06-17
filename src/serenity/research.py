@@ -55,21 +55,22 @@ def build_record(
                 result = fetch_excerpt(ref["source_url"])
                 excerpt = result.excerpt if result.ok else None
                 if not result.ok:
-                    logger.info("serenity evidence not fetched (%s): %s", result.reason, ref["source_url"])
+                    # Security-relevant blocks (an SSRF attempt) are warnings; benign misses are info.
+                    level = logging.WARNING if result.reason in ("blocked_redirect", "blocked_private_ip", "blocked_scheme") else logging.INFO
+                    logger.log(level, "serenity evidence not fetched (%s): %s", result.reason, ref["source_url"])
             except Exception as exc:  # a record must persist even if a fetch blows up
                 logger.warning("serenity fetch error for %s: %s", ref["source_url"], exc)
                 excerpt = None
+        cls = classify_reference(
+            source_url=ref["source_url"],
+            claim_summary=ref.get("claim_summary"),
+            excerpt=excerpt,
+        )
+        if not cls["substantiated"]:
+            # Make a withheld grade auditable in logs (DB column for reason is a future phase).
+            logger.info("serenity reference unsubstantiated (%s): %s", cls.get("reason"), ref["source_url"])
         classified.append(
-            {
-                **classify_reference(
-                    source_url=ref["source_url"],
-                    claim_summary=ref.get("claim_summary"),
-                    excerpt=excerpt,
-                ),
-                "source_url": ref["source_url"],
-                "claim_summary": ref.get("claim_summary"),
-                "excerpt": excerpt,
-            }
+            {**cls, "source_url": ref["source_url"], "claim_summary": ref.get("claim_summary"), "excerpt": excerpt}
         )
 
     grade = grade_evidence(classified)

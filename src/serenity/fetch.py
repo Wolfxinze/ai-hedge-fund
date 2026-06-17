@@ -42,20 +42,28 @@ from src.storage.models import SourceType
 logger = logging.getLogger(__name__)
 
 
-def _int_env(name: str, default: int) -> int:
-    try:
-        v = int(os.environ.get(name, str(default)))
-        return v if v > 0 else default  # fail-closed: never 'unlimited'
-    except (ValueError, TypeError):
+def _num_env(name: str, default, cast):
+    """Parse a positive numeric env var; fail-closed to default and WARN if invalid
+    (a misconfiguration must never be silent, even though the fallback is safe)."""
+    raw = os.environ.get(name)
+    if raw is None:
         return default
+    try:
+        v = cast(raw)
+        if v > 0:
+            return v
+    except (ValueError, TypeError):
+        pass
+    logger.warning("invalid %s=%r; using default %s", name, raw, default)
+    return default
+
+
+def _int_env(name: str, default: int) -> int:
+    return _num_env(name, default, int)
 
 
 def _float_env(name: str, default: float) -> float:
-    try:
-        v = float(os.environ.get(name, str(default)))
-        return v if v > 0 else default
-    except (ValueError, TypeError):
-        return default
+    return _num_env(name, default, float)
 
 
 EVIDENCE_FETCH_MAX_BYTES = _int_env("EVIDENCE_FETCH_MAX_BYTES", 2_000_000)
@@ -212,27 +220,23 @@ def _decode_and_truncate(raw: bytes, content_type: str | None, max_bytes: int) -
 
 
 def _read_response(resp, final_url: str, max_bytes: int) -> FetchResult:
-    status = resp.status_code
-    ctype = resp.headers.get("Content-Type", "")
-    if not (200 <= status < 300):
-        resp.close()
-        return FetchResult(False, None, final_url, status, ctype, "http_error")
-    cl = resp.headers.get("Content-Length")
-    if cl and cl.isdigit() and int(cl) > max_bytes:
-        resp.close()
-        return FetchResult(False, None, final_url, status, ctype, "too_large")
-    if not any(ctype.lower().startswith(t) for t in _TEXT_CONTENT_TYPES):
-        resp.close()
-        return FetchResult(False, None, final_url, status, ctype, "bad_content_type")
-    chunks: list[bytes] = []
-    total = 0
-    for chunk in resp.iter_content(8192):
-        total += len(chunk)
-        if total > max_bytes:
-            resp.close()
+    with resp:  # requests.Response is a context manager — closes on ANY exit, incl. a mid-stream raise
+        status = resp.status_code
+        ctype = resp.headers.get("Content-Type", "")
+        if not (200 <= status < 300):
+            return FetchResult(False, None, final_url, status, ctype, "http_error")
+        cl = resp.headers.get("Content-Length")
+        if cl and cl.isdigit() and int(cl) > max_bytes:
             return FetchResult(False, None, final_url, status, ctype, "too_large")
-        chunks.append(chunk)
-    resp.close()
+        if not any(ctype.lower().startswith(t) for t in _TEXT_CONTENT_TYPES):
+            return FetchResult(False, None, final_url, status, ctype, "bad_content_type")
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in resp.iter_content(8192):
+            total += len(chunk)
+            if total > max_bytes:
+                return FetchResult(False, None, final_url, status, ctype, "too_large")
+            chunks.append(chunk)
     raw = b"".join(chunks)
     return FetchResult(True, _decode_and_truncate(raw, ctype, max_bytes), final_url, status, ctype, "ok", len(raw))
 
@@ -279,8 +283,8 @@ def fetch_excerpt(
         return FetchResult(False, None, current, None, None, "timeout")
     except requests.RequestException:
         return FetchResult(False, None, current, None, None, "connect_error")
-    except Exception as exc:  # totality — never raise into grading
-        logger.warning("serenity fetch unexpected error for %s: %s", current, exc)
-        return FetchResult(False, None, current, None, None, "connect_error")
+    except Exception:  # totality — never raise into grading; a bug here is NOT a network error
+        logger.exception("serenity fetch internal error for %s", current)
+        return FetchResult(False, None, current, None, None, "internal_error")
     finally:
         session.close()

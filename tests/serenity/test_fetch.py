@@ -55,12 +55,19 @@ class _FakeResp:
         self.status_code = status
         self.headers = headers or {}
         self._chunks = chunks if chunks is not None else [b""]
+        self.closed = False
 
     def iter_content(self, n):
         return iter(self._chunks)
 
     def close(self):
-        pass
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
 
 def _stub_http(monkeypatch, *responses):
@@ -229,3 +236,101 @@ def test_resolve_allowlist_empty_returns_default_copy():
     al = resolve_allowlist(None)
     assert al == fetch.DEFAULT_HOST_ALLOWLIST
     assert al is not fetch.DEFAULT_HOST_ALLOWLIST  # fresh dict, not mutated
+
+
+# ── the IP pin itself (keystone — a disabled pin must NOT pass) ────────────────
+
+def test_pin_forces_validated_ip_and_restores(monkeypatch):
+    import ipaddress
+
+    order = []
+
+    def resolver(host, port=None, *a, **k):
+        order.append(host)
+        try:
+            ipaddress.ip_address(host)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (host, 0))]  # an IP resolves to itself
+        except ValueError:
+            # 'sec.gov' is public on the FIRST resolve, then 'rebinds' to an internal IP.
+            ip = "93.184.216.34" if order.count("sec.gov") == 1 else "10.0.0.5"
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolver)
+
+    seen = {}
+    def fake_request(self, method, url, **kw):
+        # What the connection layer would resolve the host to AT CONNECT TIME.
+        seen["ip"] = socket.getaddrinfo("sec.gov", 443)[0][4][0]
+        return _FakeResp(200, {"Content-Type": "text/plain"}, chunks=[b"enough body text to pass the gate"])
+
+    monkeypatch.setattr(requests.Session, "request", fake_request)
+
+    res = fetch_excerpt("https://sec.gov/x")
+    assert res.ok
+    # The pin makes connect-time resolution return the PRE-VALIDATED IP, not the rebind (10.0.0.5).
+    assert seen["ip"] == "93.184.216.34"
+    assert order.count("sec.gov") == 1  # host resolved exactly once (no re-resolve)
+    assert socket.getaddrinfo is resolver  # pin restored, no global leak
+
+
+# ── legitimate redirect IS followed (a block-everything regression must fail) ──
+
+def test_legit_redirect_followed_returns_final_body(monkeypatch):
+    _resolve_to(monkeypatch, "93.184.216.34")
+    _stub_http(
+        monkeypatch,
+        _FakeResp(302, {"Location": "https://reuters.com/final"}),
+        _FakeResp(200, {"Content-Type": "text/html"}, chunks=[b"final body text here, enough words"]),
+    )
+    res = fetch_excerpt("https://sec.gov/x")
+    assert res.ok and res.reason == "ok"
+    assert res.final_url.endswith("/final")
+    assert "final body" in res.excerpt
+
+
+# ── charset decoding ──────────────────────────────────────────────────────────
+
+def test_decode_respects_latin1(monkeypatch):
+    _resolve_to(monkeypatch, "93.184.216.34")
+    body = "café supplier bottleneck concentration".encode("latin-1")
+    _stub_http(monkeypatch, _FakeResp(200, {"Content-Type": "text/html; charset=latin-1"}, chunks=[body]))
+    assert "café" in fetch_excerpt("https://sec.gov/x").excerpt
+
+
+def test_decode_unknown_charset_falls_back_utf8(monkeypatch):
+    _resolve_to(monkeypatch, "93.184.216.34")
+    _stub_http(monkeypatch, _FakeResp(200, {"Content-Type": "text/plain; charset=unknown-8bit"}, chunks=[b"hello world body"]))
+    res = fetch_excerpt("https://sec.gov/x")
+    assert res.ok and "hello" in res.excerpt  # no crash on a bogus charset
+
+
+# ── response is closed on every terminal branch (no socket leak) ──────────────
+
+@pytest.mark.parametrize(
+    "resp",
+    [
+        _FakeResp(200, {"Content-Type": "text/html"}, chunks=[b"body text here"]),
+        _FakeResp(404, {"Content-Type": "text/html"}),
+        _FakeResp(200, {"Content-Type": "application/pdf"}),
+        _FakeResp(200, {"Content-Type": "text/html", "Content-Length": "999999999"}),
+    ],
+)
+def test_response_closed_on_every_branch(monkeypatch, resp):
+    _resolve_to(monkeypatch, "93.184.216.34")
+    monkeypatch.setattr(requests.Session, "request", lambda self, m, u, **k: resp)
+    fetch_excerpt("https://sec.gov/x", max_bytes=1000)
+    assert resp.closed is True
+
+
+# ── env config fail-closed (a dropped >0 guard would mean 'unlimited') ─────────
+
+@pytest.mark.parametrize("val", ["0", "-5", "abc", ""])
+def test_int_env_fail_closed(monkeypatch, val):
+    monkeypatch.setenv("X_TEST_INT", val)
+    assert fetch._int_env("X_TEST_INT", 100) == 100
+
+
+@pytest.mark.parametrize("val", ["0", "-1.0", "nope"])
+def test_float_env_fail_closed(monkeypatch, val):
+    monkeypatch.setenv("X_TEST_FLT", val)
+    assert fetch._float_env("X_TEST_FLT", 9.0) == 9.0
