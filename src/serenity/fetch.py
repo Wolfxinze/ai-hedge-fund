@@ -248,8 +248,15 @@ def fetch_excerpt(
     max_bytes: int | None = None,
     timeout: float | None = None,
     max_redirects: int | None = None,
+    headers: dict[str, str] | None = None,
 ) -> FetchResult:
-    """Fetch ``url`` behind the SSRF guard and return a bounded text excerpt. Total: never raises."""
+    """Fetch ``url`` behind the SSRF guard and return a bounded text excerpt. Total: never raises.
+
+    ``headers`` (e.g. a declared User-Agent some sources require, like SEC EDGAR) are
+    sent verbatim on every hop. They are request payload only — the SSRF guard (_gate /
+    _pin_getaddrinfo / _validate_ip) inspects the URL host and resolved IPs, never the
+    headers — so passing headers cannot affect host validation, the IP pin, or the caps.
+    """
     allowlist = allowlist if allowlist is not None else DEFAULT_HOST_ALLOWLIST
     max_bytes = max_bytes or EVIDENCE_FETCH_MAX_BYTES
     timeout = timeout or FETCH_TIMEOUT_SECONDS
@@ -267,7 +274,7 @@ def fetch_excerpt(
                 # distinguishable from an initial-URL failure.
                 return FetchResult(False, None, None, None, None, "blocked_redirect" if on_redirect else reason)
             with _pin_getaddrinfo(host, ips[0]):
-                resp = session.request("GET", current, allow_redirects=False, stream=True, timeout=(timeout, timeout))
+                resp = session.request("GET", current, headers=headers, allow_redirects=False, stream=True, timeout=(timeout, timeout))
             if resp.status_code in (301, 302, 303, 307, 308):
                 loc = resp.headers.get("Location")
                 status = resp.status_code
