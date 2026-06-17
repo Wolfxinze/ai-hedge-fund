@@ -224,6 +224,28 @@ class TestRateLimiting:
         expected_calls = [call(60), call(90)]
         mock_sleep.assert_has_calls(expected_calls)
 
+    @patch("src.data.providers.financial_datasets.time.sleep")
+    @patch("src.data.providers.financial_datasets.requests.get")
+    def test_retry_exhaustion_is_logged(self, mock_get, mock_sleep, caplog):
+        """When every attempt is 429, the give-up is recorded (not silent)."""
+        mock_429_response = Mock()
+        mock_429_response.status_code = 429
+        mock_429_response.text = "Too Many Requests"
+        mock_get.return_value = mock_429_response
+
+        headers = {"X-API-KEY": "test-key"}
+        url = "https://api.financialdatasets.ai/test"
+
+        with caplog.at_level("WARNING", logger="src.data.providers.financial_datasets"):
+            result = _make_api_request(url, headers, max_retries=2)
+
+        assert result.status_code == 429
+        # Backoff attempts are warned, and the exhaustion is recorded at give-up.
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("Rate limited" in msg for msg in messages)
+        assert any("gave up" in msg.lower() for msg in messages)
+        assert any(record.levelname in ("WARNING", "ERROR") for record in caplog.records)
+
 
 if __name__ == "__main__":
     pytest.main([__file__])

@@ -101,3 +101,10 @@ def test_empty_stdout_degrades(monkeypatch):
     )
     result = run_analyzing_flow(TICKER, TRADE_DATE)
     _assert_degraded(result, needle="unparseable")
+
+
+def test_config_overrides_allowlisted():
+    """#6: only allowlisted override keys are forwarded; path/url keys are dropped."""
+    out = adapter._filter_overrides({"deep_think_llm": "o3", "results_dir": "/etc", "backend_url": "http://evil"})
+    assert out == {"deep_think_llm": "o3"}
+    assert "results_dir" not in out and "backend_url" not in out

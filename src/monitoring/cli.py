@@ -33,10 +33,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
             print(f"no monitor named '{args.name}'")
             return 1
         result = run_monitor(s, monitor, trade_date=args.date)
-        print(f"ran '{result.monitor_name}': {len(result.reports)} report(s)")
+        print(f"ran '{result.monitor_name}': {len(result.reports)} report(s), {result.degraded_count} degraded")
         for r in result.reports:
             print(f"  {r['ticker']:<6} label={r['label']:<22} degraded={r['degraded']} conf={r['confidence']}")
-    return 0
+    # Exit 2 when any ticker degraded — loud at the automation boundary, matching the
+    # observing-pools CLI's PoolRefreshRun.PARTIAL -> exit 2 convention.
+    return 2 if result.any_degraded else 0
 
 
 def _cmd_list(_args: argparse.Namespace) -> int:

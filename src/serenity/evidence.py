@@ -65,6 +65,24 @@ def is_substantiated(claim: str | None, excerpt: str | None, min_overlap: float 
     return overlap >= min_overlap
 
 
+def substantiation_reason(claim: str | None, excerpt: str | None, stype: SourceType, min_overlap: float = _MIN_OVERLAP) -> str:
+    """Coarse, deterministic reason a reference did/didn't substantiate — for
+    observability, so a withheld grade is auditable (unverified host vs missing/
+    short excerpt vs no overlap). Does NOT change the grade math."""
+    if stype is SourceType.UNVERIFIED:
+        return "unverified_host"
+    excerpt_tokens = _tokens(excerpt)
+    if not excerpt_tokens:
+        return "no_excerpt"
+    if len(excerpt_tokens) < _MIN_EXCERPT_WORDS:
+        return "excerpt_too_short"
+    claim_tokens = _tokens(claim)
+    if not claim_tokens:
+        return "no_claim"
+    overlap = len(claim_tokens & excerpt_tokens) / len(claim_tokens)
+    return "ok" if overlap >= min_overlap else "no_overlap"
+
+
 def classify_reference(
     *,
     source_url: str,
@@ -72,8 +90,13 @@ def classify_reference(
     excerpt: str | None,
     allowlist: dict[str, SourceType] = DEFAULT_HOST_ALLOWLIST,
 ) -> dict:
-    """Derive {source_host, source_type, substantiated} deterministically."""
+    """Derive {source_host, source_type, substantiated, reason} deterministically.
+
+    ``reason`` is observability only (not persisted) — it explains a withheld grade
+    without changing the deterministic grade computation.
+    """
     host = host_of(source_url)
     stype = source_type_for_host(host, allowlist)
     substantiated = stype is not SourceType.UNVERIFIED and is_substantiated(claim_summary, excerpt)
-    return {"source_host": host, "source_type": stype, "substantiated": substantiated}
+    reason = substantiation_reason(claim_summary, excerpt, stype, min_overlap=_MIN_OVERLAP)
+    return {"source_host": host, "source_type": stype, "substantiated": substantiated, "reason": reason}

@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AI Hedge Fund API", description="Backend API for AI Hedge Fund", version="0.1.0")
 
-# Initialize database tables (this is safe to run multiple times)
+# Dev convenience: create any missing tables. Alembic migrations are the canonical
+# schema source (run `alembic upgrade head`); create_all coexists idempotently.
 Base.metadata.create_all(bind=engine)
 
 # Configure CORS

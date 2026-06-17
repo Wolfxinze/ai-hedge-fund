@@ -54,16 +54,24 @@ def apply_serenity_to_pool(session: Session, platform_key: str) -> dict:
         bd["composite"] = new_score
         e.score_breakdown = bd  # reassign so SQLAlchemy detects the JSON change
 
-    # Re-rank on the new composite; data_unavailable entries keep no rank.
-    rankable = sorted((e for e in entries if e.composite_score is not None), key=lambda e: e.composite_score, reverse=True)
+    # Re-rank on the new composite. A manually DROPPED entry is excluded from ranking
+    # entirely — it must not re-enter the ranked pool even if it still carries component
+    # scores (a non-None composite). data_unavailable entries keep no rank.
+    rankable = sorted(
+        (e for e in entries if e.composite_score is not None and e.status != PoolEntryStatus.DROPPED.value),
+        key=lambda e: e.composite_score,
+        reverse=True,
+    )
     for rank, e in enumerate(rankable, start=1):
         e.rank = rank
         if e.status == PoolEntryStatus.DATA_UNAVAILABLE.value:
             e.status = PoolEntryStatus.CANDIDATE.value
     for e in entries:
-        if e.composite_score is None:
+        if e.composite_score is None or e.status == PoolEntryStatus.DROPPED.value:
             e.rank = None
-            e.status = PoolEntryStatus.DATA_UNAVAILABLE.value
+            # Don't resurrect a manually DROPPED entry into data_unavailable.
+            if e.status != PoolEntryStatus.DROPPED.value:
+                e.status = PoolEntryStatus.DATA_UNAVAILABLE.value
 
     session.flush()
     return {"graded": len(graded), "median": pool_median, "reranked": len(rankable)}

@@ -1,4 +1,5 @@
 import datetime
+import logging
 import os
 import time
 
@@ -21,6 +22,8 @@ from src.data.models import (
 from src.data.providers.base import FinancialDataProvider
 from src.data.providers.exceptions import ProviderFetchError
 
+logger = logging.getLogger(__name__)
+
 _cache = get_cache()
 
 
@@ -39,9 +42,12 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
 
         if response.status_code == 429 and attempt < max_retries:
             delay = 60 + (30 * attempt)
-            print(f"Rate limited (429). Attempt {attempt + 1}/{max_retries + 1}. Waiting {delay}s before retrying...")
+            logger.warning("Rate limited (429). Attempt %d/%d. Waiting %ds before retrying...", attempt + 1, max_retries + 1, delay)
             time.sleep(delay)
             continue
+
+        if response.status_code == 429:
+            logger.error("Rate limited (429) on %s; burned %d retries then gave up.", url, max_retries)
 
         return response
 
