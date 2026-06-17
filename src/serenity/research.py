@@ -37,6 +37,7 @@ def build_record(
     downgrade_triggers: list[str] | None = None,
     min_grade: EvidenceGrade = EvidenceGrade.C,
     fetch_missing: bool = False,
+    fetch_headers: dict[str, str] | None = None,
 ) -> SerenityResearchRecord:
     """Create + persist a SerenityResearchRecord and its EvidenceReferences.
 
@@ -46,13 +47,17 @@ def build_record(
     excerpt None so the reference simply stays unsubstantiated — the record always
     persists. Default False keeps the path offline/deterministic (research-only,
     single-user-local); live fetch is opt-in.
+
+    ``fetch_headers`` is an opaque header dict forwarded to the fetcher per reference
+    (e.g. the EDGAR adapter's declared User-Agent). research stays source-agnostic —
+    it never inspects the headers; the SSRF guard is unaffected (see fetch_excerpt).
     """
     classified = []
     for ref in references:
         excerpt = ref.get("excerpt")
         if not excerpt and fetch_missing:
             try:
-                result = fetch_excerpt(ref["source_url"])
+                result = fetch_excerpt(ref["source_url"], headers=fetch_headers)
                 excerpt = result.excerpt if result.ok else None
                 if not result.ok:
                     # Security-relevant blocks (an SSRF attempt) are warnings; benign misses are info.

@@ -52,26 +52,26 @@ def test_provided_excerpt_never_refetched(session, monkeypatch):
 
 
 def test_fetch_blocked_degrades_not_raises(session, monkeypatch):
-    monkeypatch.setattr(research, "fetch_excerpt", lambda url: FetchResult(False, None, None, None, None, "blocked_redirect"))
+    monkeypatch.setattr(research, "fetch_excerpt", lambda url, **k: FetchResult(False, None, None, None, None, "blocked_redirect"))
     rec = build_record(session, theme="t", references=_refs(), scorecard={}, fetch_missing=True)
     session.commit()
     assert _evidence(session, rec).substantiated is False  # persisted, just unsubstantiated
 
 
 def test_fetch_success_still_requires_overlap(session, monkeypatch):
-    monkeypatch.setattr(research, "fetch_excerpt", lambda url: FetchResult(True, _NO_OVERLAP, "https://sec.gov/doc", 200, "text/html", "ok", 40))
+    monkeypatch.setattr(research, "fetch_excerpt", lambda url, **k: FetchResult(True, _NO_OVERLAP, "https://sec.gov/doc", 200, "text/html", "ok", 40))
     rec = build_record(session, theme="t", references=_refs(), scorecard={}, fetch_missing=True)
     session.commit()
     assert _evidence(session, rec).substantiated is False  # trusted host + non-overlap text ≠ substantiated
 
-    monkeypatch.setattr(research, "fetch_excerpt", lambda url: FetchResult(True, _OVERLAP, "https://sec.gov/doc", 200, "text/html", "ok", 80))
+    monkeypatch.setattr(research, "fetch_excerpt", lambda url, **k: FetchResult(True, _OVERLAP, "https://sec.gov/doc", 200, "text/html", "ok", 80))
     rec2 = build_record(session, theme="t", references=_refs(), scorecard={}, fetch_missing=True)
     session.commit()
     assert _evidence(session, rec2).substantiated is True
 
 
 def test_fetch_unexpected_error_isolated(session, monkeypatch):
-    def boom(url):
+    def boom(url, **k):
         raise RuntimeError("unexpected")
     monkeypatch.setattr(research, "fetch_excerpt", boom)
     rec = build_record(session, theme="t", references=_refs(), scorecard={}, fetch_missing=True)  # must not raise
@@ -79,8 +79,28 @@ def test_fetch_unexpected_error_isolated(session, monkeypatch):
     assert _evidence(session, rec).substantiated is False
 
 
+def test_fetch_headers_forwarded(session, monkeypatch):
+    """fetch_headers (e.g. the EDGAR User-Agent) reaches the fetcher per reference."""
+    captured = {}
+
+    def fake(url, *, headers=None, **k):
+        captured["headers"] = headers
+        return FetchResult(True, _OVERLAP, "https://sec.gov/doc", 200, "text/html", "ok", 80)
+
+    monkeypatch.setattr(research, "fetch_excerpt", fake)
+    build_record(
+        session,
+        theme="t",
+        references=_refs(),
+        scorecard={},
+        fetch_missing=True,
+        fetch_headers={"User-Agent": "edgar/1.0"},
+    )
+    assert captured["headers"] == {"User-Agent": "edgar/1.0"}
+
+
 def test_fetched_excerpt_persisted_and_record_graded(session, monkeypatch):
-    monkeypatch.setattr(research, "fetch_excerpt", lambda url: FetchResult(True, _OVERLAP, "https://sec.gov/doc", 200, "text/html", "ok", 80))
+    monkeypatch.setattr(research, "fetch_excerpt", lambda url, **k: FetchResult(True, _OVERLAP, "https://sec.gov/doc", 200, "text/html", "ok", 80))
     rec = build_record(
         session,
         theme="t",

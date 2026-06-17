@@ -72,6 +72,10 @@ MAX_REDIRECTS = _int_env("SERENITY_MAX_REDIRECTS", 3)
 
 _TEXT_CONTENT_TYPES = ("text/html", "text/plain", "application/xhtml+xml", "application/json", "application/xml")
 
+# Caller-supplied headers are re-sent on every hop; these must NOT be carried to a
+# different host across a redirect (credential/cookie leakage to the redirect target).
+_HOP_SENSITIVE_HEADERS = {"authorization", "cookie", "proxy-authorization"}
+
 # Deny nets beyond ipaddress flags (is_private misses CGNAT 100.64/10 and is inconsistent
 # on 0.0.0.0/8 across versions); plus the usual private/loopback/link-local for clarity.
 _DENY_NETS = [
@@ -248,8 +252,15 @@ def fetch_excerpt(
     max_bytes: int | None = None,
     timeout: float | None = None,
     max_redirects: int | None = None,
+    headers: dict[str, str] | None = None,
 ) -> FetchResult:
-    """Fetch ``url`` behind the SSRF guard and return a bounded text excerpt. Total: never raises."""
+    """Fetch ``url`` behind the SSRF guard and return a bounded text excerpt. Total: never raises.
+
+    ``headers`` (e.g. a declared User-Agent some sources require, like SEC EDGAR) are
+    sent verbatim on every hop. They are request payload only — the SSRF guard (_gate /
+    _pin_getaddrinfo / _validate_ip) inspects the URL host and resolved IPs, never the
+    headers — so passing headers cannot affect host validation, the IP pin, or the caps.
+    """
     allowlist = allowlist if allowlist is not None else DEFAULT_HOST_ALLOWLIST
     max_bytes = max_bytes or EVIDENCE_FETCH_MAX_BYTES
     timeout = timeout or FETCH_TIMEOUT_SECONDS
@@ -267,14 +278,18 @@ def fetch_excerpt(
                 # distinguishable from an initial-URL failure.
                 return FetchResult(False, None, None, None, None, "blocked_redirect" if on_redirect else reason)
             with _pin_getaddrinfo(host, ips[0]):
-                resp = session.request("GET", current, allow_redirects=False, stream=True, timeout=(timeout, timeout))
+                resp = session.request("GET", current, headers=headers, allow_redirects=False, stream=True, timeout=(timeout, timeout))
             if resp.status_code in (301, 302, 303, 307, 308):
                 loc = resp.headers.get("Location")
                 status = resp.status_code
                 resp.close()
                 if not loc:
                     return FetchResult(False, None, current, status, None, "http_error")
+                prev_host = (urlsplit(current).hostname or "").lower()
                 current = urljoin(current, loc)
+                if headers and (urlsplit(current).hostname or "").lower() != prev_host:
+                    # Cross-host redirect: drop credentials so they can't leak to the new host.
+                    headers = {k: v for k, v in headers.items() if k.lower() not in _HOP_SENSITIVE_HEADERS}
                 on_redirect = True
                 continue
             return _read_response(resp, current, max_bytes)
