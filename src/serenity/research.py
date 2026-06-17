@@ -6,16 +6,21 @@ substantiation + the computed grade deterministically and persists the record
 with a non-null disclaimer (PRD v4 §9.6, §9.9).
 """
 
+import logging
+
 from sqlalchemy.orm import Session
 
 from src.compliance import research_disclaimer
 from src.serenity.evidence import classify_reference
+from src.serenity.fetch import fetch_excerpt
 from src.serenity.grading import grade_evidence, recommended_action, serenity_score
 from src.storage.models import (
     EvidenceGrade,
     EvidenceReference,
     SerenityResearchRecord,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def build_record(
@@ -31,24 +36,41 @@ def build_record(
     risks: list[str] | None = None,
     downgrade_triggers: list[str] | None = None,
     min_grade: EvidenceGrade = EvidenceGrade.C,
+    fetch_missing: bool = False,
 ) -> SerenityResearchRecord:
     """Create + persist a SerenityResearchRecord and its EvidenceReferences.
 
-    ``references`` items: ``{source_url, claim_summary?, excerpt?}``.
+    ``references`` items: ``{source_url, claim_summary?, excerpt?}``. When
+    ``fetch_missing`` is True, a reference with no excerpt is fetched through the
+    SSRF-guarded fetcher (src.serenity.fetch); a blocked/failed fetch leaves the
+    excerpt None so the reference simply stays unsubstantiated — the record always
+    persists. Default False keeps the path offline/deterministic (research-only,
+    single-user-local); live fetch is opt-in.
     """
-    classified = [
-        {
-            **classify_reference(
-                source_url=ref["source_url"],
-                claim_summary=ref.get("claim_summary"),
-                excerpt=ref.get("excerpt"),
-            ),
-            "source_url": ref["source_url"],
-            "claim_summary": ref.get("claim_summary"),
-            "excerpt": ref.get("excerpt"),
-        }
-        for ref in references
-    ]
+    classified = []
+    for ref in references:
+        excerpt = ref.get("excerpt")
+        if not excerpt and fetch_missing:
+            try:
+                result = fetch_excerpt(ref["source_url"])
+                excerpt = result.excerpt if result.ok else None
+                if not result.ok:
+                    logger.info("serenity evidence not fetched (%s): %s", result.reason, ref["source_url"])
+            except Exception as exc:  # a record must persist even if a fetch blows up
+                logger.warning("serenity fetch error for %s: %s", ref["source_url"], exc)
+                excerpt = None
+        classified.append(
+            {
+                **classify_reference(
+                    source_url=ref["source_url"],
+                    claim_summary=ref.get("claim_summary"),
+                    excerpt=excerpt,
+                ),
+                "source_url": ref["source_url"],
+                "claim_summary": ref.get("claim_summary"),
+                "excerpt": excerpt,
+            }
+        )
 
     grade = grade_evidence(classified)
     score = serenity_score(scorecard, grade, min_grade=min_grade)
