@@ -7,6 +7,7 @@ rate limit, (5) never raise into build_record, and (6) never itself assert subst
 """
 
 import json
+import logging
 
 import pytest
 from sqlalchemy import create_engine
@@ -18,6 +19,7 @@ from src.serenity.adapters import edgar
 from src.serenity.adapters.edgar import (
     _filing_document_url,
     _is_sec_host,
+    _normalize_cik,
     build_edgar_references,
     discover_filings,
     edgar_fetch_headers,
@@ -129,7 +131,12 @@ def test_filing_document_url_strips_dashes_and_unpads_cik():
 
 @pytest.mark.parametrize(
     "acc,doc",
-    [("0000320193-23-000106", "../../evil.htm"), ("bad/accession", "x.htm"), ("0000320193-23-000106", "a b.htm")],
+    [
+        ("0000320193-23-000106", "../../evil.htm"),
+        ("bad/accession", "x.htm"),
+        ("0000320193-23-000106", "a b.htm"),
+        ("0000320193-23-000106", ".."),  # dot-dot with no slash still rejected
+    ],
 )
 def test_filing_document_url_rejects_malformed(acc, doc):
     with pytest.raises(ValueError):
@@ -255,3 +262,85 @@ def test_edgar_refs_substantiate_only_when_filing_text_overlaps(session, monkeyp
     session.commit()
     ev2 = session.query(m.EvidenceReference).filter_by(record_id=rec2.id).one()
     assert ev2.substantiated is False
+
+
+# ── review hardening: misalignment, observability, caps, edge cases ────────────
+
+_MISALIGNED_JSON = json.dumps(
+    {
+        "filings": {
+            "recent": {
+                "accessionNumber": ["0000320193-23-000106", "0000320193-23-000077"],
+                "form": ["10-K"],  # shorter than the others → columnar misalignment
+                "filingDate": ["2023-11-03", "2023-08-04"],
+                "primaryDocument": ["a.htm", "b.htm"],
+            }
+        }
+    }
+)
+
+
+def test_discover_filings_drops_misaligned_arrays(monkeypatch):
+    """Unequal parallel arrays would let zip() pair the wrong document with an accession;
+    the whole block must be dropped rather than emit a host-valid but WRONG filing URL."""
+    _wire(monkeypatch, submissions=_ok(_MISALIGNED_JSON))
+    assert discover_filings("0000320193", forms=("10-K", "10-Q"), max_filings=3) == []
+
+
+def test_403_is_logged_at_warning(monkeypatch, caplog):
+    """A 403 (the failure the User-Agent exists to prevent) must be louder than a benign miss."""
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "test test@example.com")  # silence the unset-UA WARN
+    blocked = FetchResult(False, None, "https://www.sec.gov/x", 403, "text/html", "http_error")
+    _wire(monkeypatch, tickers=blocked)
+    with caplog.at_level(logging.INFO, logger="src.serenity.adapters.edgar"):
+        assert resolve_cik("AAPL") is None
+    assert any(r.levelno == logging.WARNING and "403" in r.getMessage() for r in caplog.records)
+
+
+def test_benign_miss_stays_info(monkeypatch, caplog):
+    """A non-403 miss (e.g. timeout) stays at INFO so 403s remain distinguishable."""
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "test test@example.com")  # silence the unset-UA WARN
+    _wire(monkeypatch, tickers=_fail("timeout"))
+    with caplog.at_level(logging.INFO, logger="src.serenity.adapters.edgar"):
+        assert resolve_cik("AAPL") is None
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+def test_resolution_gets_request_large_byte_cap(monkeypatch):
+    """The index JSONs must be fetched with the larger cap, else a big company_tickers.json
+    truncates and CIK resolution silently fails. Pins the constant's whole purpose."""
+    f = _wire(monkeypatch)
+    resolve_cik("AAPL")
+    assert f.calls and all(c["max_bytes"] == edgar._JSON_MAX_BYTES for c in f.calls)
+
+
+def test_resolution_gets_carry_exact_user_agent(monkeypatch):
+    f = _wire(monkeypatch)
+    build_edgar_references("AAPL", keywords=["k"], forms=("10-K",), user_agent="acme test@acme.com")
+    assert f.calls and all(c["headers"] == {"User-Agent": "acme test@acme.com"} for c in f.calls)
+
+
+def test_bad_max_filings_degrades_not_raises(monkeypatch):
+    _wire(monkeypatch)
+    refs = build_edgar_references("AAPL", keywords=["k"], forms=("10-K", "10-Q"), max_filings="bad")
+    assert isinstance(refs, list)  # totality: a non-int cap degrades to the default, never raises
+
+
+def test_empty_keywords_yields_unsubstantiatable_refs(monkeypatch):
+    """Empty keywords → empty claim → can never substantiate (pins intent vs a future default)."""
+    _wire(monkeypatch)
+    refs = build_edgar_references("AAPL", keywords=[], forms=("10-K",), max_filings=1)
+    assert len(refs) == 1 and refs[0]["claim_summary"] == ""
+
+
+def test_discover_filings_no_matching_forms_is_empty(monkeypatch):
+    _wire(monkeypatch)
+    assert discover_filings("0000320193", forms=("S-1",), max_filings=3) == []
+
+
+def test_normalize_cik_guards():
+    assert _normalize_cik(True) is None  # bool is an int subclass — must be rejected
+    assert _normalize_cik(-1) is None
+    assert _normalize_cik("../evil") is None
+    assert _normalize_cik("320193") == "0000320193"
+    assert _normalize_cik(320193) == "0000320193"

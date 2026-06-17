@@ -72,6 +72,10 @@ MAX_REDIRECTS = _int_env("SERENITY_MAX_REDIRECTS", 3)
 
 _TEXT_CONTENT_TYPES = ("text/html", "text/plain", "application/xhtml+xml", "application/json", "application/xml")
 
+# Caller-supplied headers are re-sent on every hop; these must NOT be carried to a
+# different host across a redirect (credential/cookie leakage to the redirect target).
+_HOP_SENSITIVE_HEADERS = {"authorization", "cookie", "proxy-authorization"}
+
 # Deny nets beyond ipaddress flags (is_private misses CGNAT 100.64/10 and is inconsistent
 # on 0.0.0.0/8 across versions); plus the usual private/loopback/link-local for clarity.
 _DENY_NETS = [
@@ -281,7 +285,11 @@ def fetch_excerpt(
                 resp.close()
                 if not loc:
                     return FetchResult(False, None, current, status, None, "http_error")
+                prev_host = (urlsplit(current).hostname or "").lower()
                 current = urljoin(current, loc)
+                if headers and (urlsplit(current).hostname or "").lower() != prev_host:
+                    # Cross-host redirect: drop credentials so they can't leak to the new host.
+                    headers = {k: v for k, v in headers.items() if k.lower() not in _HOP_SENSITIVE_HEADERS}
                 on_redirect = True
                 continue
             return _read_response(resp, current, max_bytes)

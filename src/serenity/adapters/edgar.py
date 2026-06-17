@@ -47,8 +47,10 @@ _DOCUMENT_RE = re.compile(r"^[A-Za-z0-9._\-]{1,128}$")
 _DEFAULT_FORMS: tuple[str, ...] = ("10-K", "10-Q", "8-K")
 _MAX_FILINGS_CAP = 5  # hard ceiling so a single record can never burst EDGAR's ~10 req/s
 _DEFAULT_USER_AGENT = "ai-hedge-fund serenity-research contact@example.com"
-# The EDGAR index JSONs are larger than an evidence excerpt; give them headroom so a
-# truncated body never silently fails json.loads (the default 2 MB cap is for filings).
+# The EDGAR index JSONs are larger than an evidence excerpt. The default 2 MB filing cap
+# would truncate them mid-object, json.loads would then fail, and CIK resolution would
+# silently zero out. Give them headroom so a legitimately large index parses whole. (A
+# body that still exceeds this is truncated → json.loads fails → clean degrade to None.)
 _JSON_MAX_BYTES = 8_000_000
 
 
@@ -109,7 +111,7 @@ def _is_sec_host(url: str) -> bool:
 def _filing_document_url(cik: str, accession_no: str, primary_document: str) -> str:
     """Pure: compose the canonical *.sec.gov Archives document URL. Raises ValueError on a
     malformed accession/document so the caller drops that filing rather than emit garbage."""
-    if not _ACCESSION_RE.match(accession_no) or not _DOCUMENT_RE.match(primary_document):
+    if not _ACCESSION_RE.match(accession_no) or not _DOCUMENT_RE.match(primary_document) or ".." in primary_document:
         raise ValueError("malformed accession/document")
     accession_nodash = accession_no.replace("-", "")
     return _ARCHIVES_URL.format(cik=int(cik), accession=accession_nodash, document=primary_document)
@@ -123,7 +125,11 @@ def _fetch_json(url: str, *, allowlist: dict[str, SourceType], user_agent: str) 
             url, allowlist=allowlist, max_bytes=_JSON_MAX_BYTES, headers={"User-Agent": user_agent}
         )
         if not result.ok or not result.excerpt:
-            logger.info("edgar fetch not ok (%s): %s", result.reason, url)
+            # A 403/429 is the failure the User-Agent exists to prevent (missing/garbage UA,
+            # or an IP rate-limit ban) — it is operationally actionable, so it must be LOUDER
+            # than a benign "this ticker has no such filing" miss.
+            level = logging.WARNING if result.status in (403, 429) else logging.INFO
+            logger.log(level, "edgar fetch not ok (%s, http %s): %s", result.reason, result.status, url)
             return None
         return json.loads(result.excerpt)
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
@@ -183,6 +189,17 @@ def discover_filings(
     form_list = recent.get("form") or []
     filing_date = recent.get("filingDate") or []
     primary_doc = recent.get("primaryDocument") or []
+    # EDGAR's recent block is columnar: index i of every array describes ONE filing.
+    # Unequal lengths mean a partial/corrupt response — zip() would silently realign rows
+    # and pair the wrong document with an accession, fabricating a host-valid but wrong
+    # filing URL. Drop the whole block rather than emit misaligned evidence.
+    cols = (accession, form_list, filing_date, primary_doc)
+    if len({len(c) for c in cols}) != 1:
+        logger.warning(
+            "edgar submissions arrays misaligned for CIK %s (lengths %s); dropping",
+            cik_norm, [len(c) for c in cols],
+        )
+        return []
     want = {str(f).upper() for f in forms}
     out: list[FilingRef] = []
     for acc, form, date, doc in zip(accession, form_list, filing_date, primary_doc):
@@ -234,7 +251,10 @@ def build_edgar_references(
     GETs go out here). An invalid ticker / blocked resolution / no matching filing yields
     [] — a record then builds with zero references and simply stays ungraded.
     """
-    max_filings = max(1, min(int(max_filings), _MAX_FILINGS_CAP))
+    try:  # totality: a non-int max_filings must degrade, not raise into the caller
+        max_filings = max(1, min(int(max_filings), _MAX_FILINGS_CAP))
+    except (TypeError, ValueError):
+        max_filings = 3
     allowlist = allowlist if allowlist is not None else DEFAULT_HOST_ALLOWLIST
     ua = _user_agent(user_agent)
     cik = resolve_cik(ticker, allowlist=allowlist, user_agent=ua)

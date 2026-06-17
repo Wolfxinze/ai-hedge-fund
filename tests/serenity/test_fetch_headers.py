@@ -64,3 +64,27 @@ def test_headers_default_none_unchanged(monkeypatch):
 
     assert res.ok
     assert captured["headers"] is None
+
+
+def test_credentials_stripped_on_cross_host_redirect(monkeypatch):
+    """Credentials must NOT be carried to a different host across a redirect (leakage), but
+    a non-sensitive header like User-Agent is preserved. (sec.gov → reuters.com: both
+    allowlisted, so the redirect proceeds and the second hop fires.)"""
+    _resolve_to(monkeypatch, "93.184.216.34")
+    seen = []
+
+    def fake_request(self, method, url, **kw):
+        seen.append((url, dict(kw.get("headers") or {})))
+        if "sec.gov/start" in url:
+            return _FakeResp(302, {"Location": "https://www.reuters.com/end"}, [b""])
+        return _FakeResp(200, {"Content-Type": "text/html"}, [b"hello world body text here ok"])
+
+    monkeypatch.setattr(requests.Session, "request", fake_request)
+    res = fetch_excerpt(
+        "https://www.sec.gov/start",
+        headers={"User-Agent": "ua/1.0", "Authorization": "Bearer SECRET", "Cookie": "s=1"},
+    )
+
+    assert res.ok
+    assert seen[0][1] == {"User-Agent": "ua/1.0", "Authorization": "Bearer SECRET", "Cookie": "s=1"}
+    assert seen[1][1] == {"User-Agent": "ua/1.0"}  # credentials dropped, UA kept
