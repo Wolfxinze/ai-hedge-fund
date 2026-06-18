@@ -36,14 +36,28 @@ def _cmd_research(args: argparse.Namespace) -> int:
     # builds the patents.google.com URL; the body is fetched downstream by build_record
     # (fetch_missing=True) and gated by is_substantiated. claim_summary is keyword-only (drawn
     # from --claim, same policy as the edgar/fedreg adapters).
-    references.extend(
-        build_patent_references(args.patent, keywords=(args.claim or "").split(), max_patents=len(args.patent) or 1)
-    )
+    patent_refs = build_patent_references(args.patent, keywords=(args.claim or "").split(), max_patents=len(args.patent) or 1)
+    if args.patent:
+        # The adapter is network-free, so every dropped number is a caller input error — surface
+        # the gap so a silently-emptied patent set can't masquerade as "no evidence" (mirrors the
+        # discover command's all-errored handling: warn, and fail loud when nothing usable remains).
+        rejected = len(args.patent) - len(patent_refs)
+        if rejected:
+            print(f"research: WARNING {rejected} of {len(args.patent)} --patent number(s) rejected as invalid", file=sys.stderr)
+        if not patent_refs and not args.url:
+            print(f"research: all {len(args.patent)} --patent number(s) were invalid; no evidence gathered", file=sys.stderr)
+            return 2
+    references.extend(patent_refs)
     # Patent bodies are never user-supplied, so they must be fetched; enabling fetch_missing only
     # when --patent is present preserves the existing offline behavior for --url-only calls. Google
-    # Patents needs no header, so fetch_headers stays {} (patents_fetch_headers).
+    # Patents needs no header, so fetch_headers stays {} (patents_fetch_headers). NOTE: with --patent
+    # present, fetch_missing applies to ALL references, so a --url lacking --excerpt is ALSO fetched —
+    # with the patents (empty) headers, which carry no source-specific UA. Warn so a mixed call never
+    # silently fetches a --url with the wrong headers; `discover` is the proper multi-source path.
     fetch_missing = bool(args.patent)
     fetch_headers = patents_fetch_headers() if args.patent else None
+    if args.patent and args.url and not args.excerpt:
+        print("research: WARNING --url reference(s) without --excerpt will be fetched with no source-specific headers; use `discover` for multi-source evidence", file=sys.stderr)
     with session_scope() as s:
         record = build_record(
             s,

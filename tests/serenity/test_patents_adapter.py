@@ -12,6 +12,8 @@ fetch + substantiation are exercised through ``research.build_record(fetch_missi
       even on a real patent page, does not).
 """
 
+import logging
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -152,14 +154,28 @@ def test_single_element_list_is_valid_not_a_degrade():
     ]
 
 
-def test_never_raises_on_internal_error(monkeypatch):
-    """Totality: an unexpected error inside the build loop degrades to [], never propagates."""
+def test_never_raises_on_internal_error(monkeypatch, caplog):
+    """Totality: an unexpected error inside the build loop degrades to [] AND is logged loudly
+    (the fail-loud guarantee is part of the contract, not incidental) — never propagates."""
 
     def boom(_number):
         raise RuntimeError("unexpected")
 
     monkeypatch.setattr(patents, "_patent_url", boom)
-    assert build_patent_references(["US6285999B1"], keywords=["k"]) == []
+    with caplog.at_level(logging.ERROR, logger="src.serenity.adapters.patents"):
+        assert build_patent_references(["US6285999B1"], keywords=["k"]) == []
+    assert "patents unexpected error" in caplog.text
+
+
+def test_max_patents_zero_floors_to_one():
+    """The max(1, ...) floor: a 0/negative cap must still emit one ref, not silently empty."""
+    assert len(build_patent_references(["US123"], keywords=["k"], max_patents=0)) == 1
+
+
+def test_non_string_element_dropped_siblings_survive():
+    """A poisoned non-string element in the list is dropped while valid siblings survive."""
+    refs = build_patent_references([None, 42, "US6285999B1"], keywords=["k"])
+    assert [r["source_url"] for r in refs] == ["https://patents.google.com/patent/US6285999B1/en"]
 
 
 def test_empty_keywords_yields_empty_claim_summary():
@@ -185,6 +201,10 @@ def test_normalize_number_guards():
     assert _normalize_number(123) is None
     assert _normalize_number("US12@34") is None
     assert _normalize_number("US..34") is None
+    # fullmatch (not match) pin: a valid prefix followed by an internal separator must be rejected
+    # whole — a .match() regression would accept the "US123" prefix and emit a path-injected URL.
+    assert _normalize_number("US123 B2") is None
+    assert _normalize_number("US123/B2") is None
 
 
 # ── end-to-end composition with build_record (adapter never asserts substantiation) ──
