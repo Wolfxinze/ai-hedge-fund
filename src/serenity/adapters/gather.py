@@ -18,11 +18,11 @@ adapter's use of ``fetch_excerpt``.
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit, urlunsplit
 
 from src.serenity.adapters import edgar, federal_register
-from src.serenity.evidence import DEFAULT_HOST_ALLOWLIST, host_of, source_type_for_host
+from src.serenity.evidence import DEFAULT_HOST_ALLOWLIST, source_type_for_host
 from src.storage.models import SourceType
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,8 @@ class GatherResult:
     references: list[dict]  # deduped [{source_url, claim_summary}] across all sources
     headers_by_source: dict[str, dict]  # {"edgar": {"User-Agent": ...}, "federal_register": {...}}
     groups: list  # [(fetch_headers, [refs]), ...] — loop into one build_record per group
+    errors: dict[str, str] = field(default_factory=dict)  # {source: exc_type} for sources that raised
+    counts: dict[str, int] = field(default_factory=dict)  # {source: n_refs} — distinguishes empty from broken
 
 
 def _edgar_refs(ticker, keywords, max_per_source, allowlist, user_agent):
@@ -58,12 +60,15 @@ _REGISTRY = {
 
 
 def _norm_url(url: str) -> str:
-    """Normalize for dedup: lowercase scheme+host, strip a trailing slash, drop fragment, keep
-    query. Collisions across sources are near-impossible (disjoint hosts) — this mainly guards
-    a single source emitting the same URL twice."""
+    """Normalize for dedup: lowercase scheme+host (dropping any userinfo/port-case), strip a
+    trailing slash, drop fragment, keep query. Collisions across sources are near-impossible
+    (disjoint hosts) — this mainly guards a single source emitting the same URL twice, and
+    prevents a userinfo-prefix variant from escaping dedup."""
     parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    netloc = f"{host}:{parts.port}" if parts.port else host
     path = parts.path.rstrip("/") or "/"
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
+    return urlunsplit((parts.scheme.lower(), netloc, path, parts.query, ""))
 
 
 def gather_references(
@@ -83,6 +88,8 @@ def gather_references(
     merged: list[dict] = []
     groups: list = []
     headers_by_source: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+    counts: dict[str, int] = {}
     for name in sources:
         entry = _REGISTRY.get(name)
         if entry is None:
@@ -93,17 +100,25 @@ def gather_references(
         headers_by_source[name] = headers
         try:
             refs = builder(ticker, keywords, max_per_source, allowlist, user_agent)
-        except Exception:  # totality — one source must never sink the others
+        except Exception as exc:  # totality — one source must never sink the others
             logger.exception("gather: source %r failed; contributing no references", name)
+            errors[name] = type(exc).__name__  # carry the failure so the producer can surface it
             refs = []
         group_refs: list[dict] = []
         for ref in refs or []:
             url = ref.get("source_url") if isinstance(ref, dict) else None
             if not isinstance(url, str):
                 continue
-            # Final host filter: a buggy adapter must not leak an off-allowlist URL into the list.
-            if source_type_for_host(host_of(url), allowlist) is SourceType.UNVERIFIED:
-                logger.warning("gather: dropping off-allowlist url from %s: %s", name, url)
+            try:
+                parts = urlsplit(url)
+            except ValueError:
+                continue
+            host = (parts.hostname or "").lower()
+            # Final filter (defense-in-depth): drop off-allowlist OR userinfo-bearing URLs so a
+            # buggy adapter can't leak one — and stay consistent with the fetcher, which rejects
+            # both. host is parsed the same way as fetch._gate (urlsplit().hostname).
+            if parts.username or parts.password or source_type_for_host(host, allowlist) is SourceType.UNVERIFIED:
+                logger.warning("gather: dropping off-allowlist/userinfo url from %s: %s", name, url)
                 continue
             key = _norm_url(url)
             if key in seen:
@@ -111,5 +126,8 @@ def gather_references(
             seen.add(key)
             merged.append(ref)
             group_refs.append(ref)
+        counts[name] = len(group_refs)
         groups.append((headers, group_refs))
-    return GatherResult(references=merged, headers_by_source=headers_by_source, groups=groups)
+    return GatherResult(
+        references=merged, headers_by_source=headers_by_source, groups=groups, errors=errors, counts=counts
+    )

@@ -32,13 +32,17 @@ _FR_HOST = "federalregister.gov"
 
 # The term is only ever a urlencoded query VALUE (never a host/path segment), so it is far
 # lower-risk than EDGAR's ticker; still validate to a conservative full-text-search charset.
+# (`/` and `+` are allowed but harmless — urlencode percent-encodes them into the value.)
 _TERM_RE = re.compile(r"^[\w .,&\-/+()]{1,256}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DOC_TYPE_VALUES = {"RULE", "PRORULE", "NOTICE", "PRESDOCU"}
 
 _FIELDS = ("document_number", "title", "type", "publication_date", "html_url")
 _MAX_DOCS_CAP = 5  # hard ceiling so a single record can't burst the API rate limit
-_PER_PAGE = 20  # small fixed page; never paginate beyond page 1 for evidence
+_PER_PAGE = 20  # overfetch a small fixed page (then trim to cap) so on-host docs aren't lost
+# to off-host drops; never paginate beyond page 1 for evidence.
+# Fetch failure reasons that are operationally actionable (vs a benign miss) and warrant WARNING.
+_ACTIONABLE_REASONS = {"bad_content_type", "too_large", "blocked_redirect"}
 _JSON_MAX_BYTES = 4_000_000
 _DEFAULT_USER_AGENT = "ai-hedge-fund serenity-research contact@example.com"
 
@@ -66,9 +70,12 @@ def _is_federal_register_host(url: str) -> bool:
     """True iff ``url``'s host is federalregister.gov or a subdomain (defense-in-depth: a hit's
     html_url must stay on-host; pdf_url/raw_text_url often point off-host to govinfo.gov/S3)."""
     try:
-        host = (urlsplit(url).hostname or "").lower()
+        parts = urlsplit(url)
     except ValueError:
         return False
+    if parts.username or parts.password:  # userinfo — the fetcher rejects '@'; stay consistent
+        return False
+    host = (parts.hostname or "").lower()
     return host == _FR_HOST or host.endswith("." + _FR_HOST)
 
 
@@ -106,7 +113,10 @@ def _fetch_json(url: str, *, allowlist: dict[str, SourceType], user_agent: str) 
     try:
         result = fetch_excerpt(url, allowlist=allowlist, max_bytes=_JSON_MAX_BYTES, headers={"User-Agent": user_agent})
         if not result.ok or not result.excerpt:
-            level = logging.WARNING if result.status in (403, 429) else logging.INFO
+            # 403/429 (UA/rate) AND contract-violation reasons (a 200 non-JSON body means the
+            # API shape changed or a block page was served) are actionable → WARNING, not INFO.
+            actionable = result.status in (403, 429) or result.reason in _ACTIONABLE_REASONS
+            level = logging.WARNING if actionable else logging.INFO
             logger.log(level, "federal_register fetch not ok (%s, http %s): %s", result.reason, result.status, url)
             return None
         return json.loads(result.excerpt)
@@ -142,17 +152,22 @@ def search_documents(
     after = published_after if (published_after and _DATE_RE.match(published_after)) else None
     before = published_before if (published_before and _DATE_RE.match(published_before)) else None
     allowlist = allowlist if allowlist is not None else DEFAULT_HOST_ALLOWLIST
-    url = _build_query(norm, types, after, before, min(cap, _PER_PAGE))
+    # Overfetch a fixed page, then trim to cap — so on-host docs aren't lost when some hits
+    # carry only an off-host html_url and get dropped below.
+    url = _build_query(norm, types, after, before, _PER_PAGE)
     data = _fetch_json(url, allowlist=allowlist, user_agent=_user_agent(user_agent))
     if not isinstance(data, dict):
         return []
     results = data.get("results")
     if not isinstance(results, list):
+        logger.warning("federal_register: response has no 'results' list — API shape may have changed: %s", url)
         return []
     out: list[FederalRegisterDoc] = []
+    seen = 0
     for hit in results:
         if not isinstance(hit, dict):
             continue
+        seen += 1
         html_url = hit.get("html_url")
         if not isinstance(html_url, str) or not _is_federal_register_host(html_url):
             continue  # only the on-host human-readable page; never pdf_url/raw_text_url
@@ -167,6 +182,10 @@ def search_documents(
         )
         if len(out) >= cap:
             break
+    if seen and not out:
+        # Non-empty results but nothing usable → a renamed/relocated html_url field is the
+        # likely cause; this would otherwise look identical to a genuine "no documents".
+        logger.warning("federal_register: %d result(s) but 0 usable on-host html_url — API shape may have changed: %s", seen, url)
     return out
 
 

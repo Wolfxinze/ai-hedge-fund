@@ -173,3 +173,70 @@ def test_invalid_doc_type_filtered(monkeypatch):
 def test_fetch_headers_returns_user_agent():
     assert "User-Agent" in federal_register_fetch_headers()
     assert federal_register_fetch_headers("custom ua")["User-Agent"] == "custom ua"
+
+
+# ── review hardening: observability, overfetch-trim, edge cases ─────────────────
+
+def test_429_logged_at_warning(monkeypatch, caplog):
+    _wire(monkeypatch, _fail("http_error", status=429))
+    with caplog.at_level(logging.INFO, logger="src.serenity.adapters.federal_register"):
+        assert search_documents("x", max_documents=3) == []
+    assert any(r.levelno == logging.WARNING and "429" in r.getMessage() for r in caplog.records)
+
+
+def test_bad_content_type_logged_at_warning(monkeypatch, caplog):
+    """A 200 with a non-JSON body means the API shape changed / a block page — actionable."""
+    _wire(monkeypatch, FetchResult(False, None, "https://www.federalregister.gov/x", 200, "text/html", "bad_content_type"))
+    with caplog.at_level(logging.INFO, logger="src.serenity.adapters.federal_register"):
+        assert search_documents("x", max_documents=3) == []
+    assert any(r.levelno == logging.WARNING and "bad_content_type" in r.getMessage() for r in caplog.records)
+
+
+def test_results_nonempty_but_all_offhost_warns(monkeypatch, caplog):
+    """Non-empty results with zero usable on-host html_url must WARN (API field renamed),
+    not silently return [] looking like 'no documents'."""
+    payload = json.dumps({"results": [{"html_url": "https://evil.example.com/a"}, {"html_url": "https://govinfo.gov/b"}]})
+    _wire(monkeypatch, _ok(payload))
+    with caplog.at_level(logging.INFO, logger="src.serenity.adapters.federal_register"):
+        assert search_documents("x", max_documents=3) == []
+    assert any(r.levelno == logging.WARNING and "API shape" in r.getMessage() for r in caplog.records)
+
+
+def test_overfetch_then_trim_keeps_cap_on_host_docs(monkeypatch):
+    """Off-host hits interleaved with on-host hits must NOT shrink the result below the cap:
+    the adapter overfetches a page and trims to cap AFTER dropping off-host hits."""
+    hits = [
+        {"document_number": "1", "title": "t", "type": "Rule", "publication_date": "2026-01-01", "html_url": "https://www.federalregister.gov/documents/1"},
+        {"html_url": "https://govinfo.gov/off"},  # off-host — dropped, must not consume a slot
+        {"document_number": "2", "title": "t", "type": "Rule", "publication_date": "2026-01-02", "html_url": "https://www.federalregister.gov/documents/2"},
+        {"document_number": "3", "title": "t", "type": "Rule", "publication_date": "2026-01-03", "html_url": "https://www.federalregister.gov/documents/3"},
+        {"document_number": "4", "title": "t", "type": "Rule", "publication_date": "2026-01-04", "html_url": "https://www.federalregister.gov/documents/4"},
+    ]
+    _wire(monkeypatch, _ok(json.dumps({"results": hits})))
+    refs = build_federal_register_references("x", keywords=["k"], max_documents=3)
+    assert len(refs) == 3  # 3 on-host kept despite the off-host hit in the middle
+    assert all("govinfo" not in r["source_url"] for r in refs)
+
+
+def test_hit_missing_html_url_skipped(monkeypatch):
+    payload = json.dumps({"results": [
+        {"document_number": "1", "type": "Rule", "publication_date": "2026-01-01", "html_url": "https://www.federalregister.gov/documents/1"},
+        {"document_number": "2", "type": "Rule", "publication_date": "2026-01-02"},  # no html_url key
+    ]})
+    _wire(monkeypatch, _ok(payload))
+    refs = build_federal_register_references("x", keywords=["k"], max_documents=5)
+    assert len(refs) == 1
+
+
+def test_empty_keywords_yields_empty_claim_summary(monkeypatch):
+    _wire(monkeypatch)
+    refs = build_federal_register_references("x", keywords=[], max_documents=5)
+    assert refs and all(r["claim_summary"] == "" for r in refs)
+
+
+def test_both_dates_kept_when_valid(monkeypatch):
+    f = _wire(monkeypatch, _ok(json.dumps({"results": []})))
+    search_documents("x", published_after="2026-01-01", published_before="2026-03-31", max_documents=3)
+    q = parse_qs(urlsplit(f.calls[0]["url"]).query)
+    assert q.get("conditions[publication_date][gte]") == ["2026-01-01"]
+    assert q.get("conditions[publication_date][lte]") == ["2026-03-31"]

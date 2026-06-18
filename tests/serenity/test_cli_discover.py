@@ -78,3 +78,43 @@ def test_discover_no_evidence_returns_zero_without_building(monkeypatch):
     monkeypatch.setattr(cli, "build_record", must_not_build)
     monkeypatch.setattr(cli, "gather_references", lambda ticker, **k: GatherResult(references=[], headers_by_source={}, groups=[]))
     assert cli.main(_argv()) == 0
+
+
+def test_discover_all_sources_errored_exits_nonzero(monkeypatch):
+    """'every source errored' must NOT look like 'no evidence' — exit non-zero so a pipeline
+    can tell broken from empty."""
+    def must_not_build(*a, **k):
+        raise AssertionError("build_record must not be called when all sources errored")
+
+    monkeypatch.setattr(cli, "build_record", must_not_build)
+    monkeypatch.setattr(
+        cli, "gather_references",
+        lambda ticker, **k: GatherResult(
+            references=[], headers_by_source={"edgar": {}, "federal_register": {}}, groups=[],
+            errors={"edgar": "RuntimeError", "federal_register": "ValueError"},
+            counts={"edgar": 0, "federal_register": 0},
+        ),
+    )
+    assert cli.main(_argv()) == 2
+
+
+def test_discover_one_group_failing_preserves_others(monkeypatch):
+    """A later group's build_record raising must not roll back / hide earlier records."""
+    calls = []
+
+    def flaky_build_record(session, **kw):
+        calls.append(kw)
+        if len(calls) == 2:
+            raise RuntimeError("second group blew up")
+        return types.SimpleNamespace(id=len(calls), ticker="NVDA", evidence_grade="B", serenity_score=70)
+
+    g1 = ({"User-Agent": "edgar-ua"}, [{"source_url": "https://www.sec.gov/x", "claim_summary": "c"}])
+    g2 = ({"User-Agent": "fr-ua"}, [{"source_url": "https://www.federalregister.gov/y", "claim_summary": "c"}])
+    monkeypatch.setattr(cli, "build_record", flaky_build_record)
+    monkeypatch.setattr(
+        cli, "gather_references",
+        lambda ticker, **k: GatherResult(references=g1[1] + g2[1], headers_by_source={}, groups=[g1, g2]),
+    )
+    rc = cli.main(_argv())
+    assert rc == 0  # first group persisted, so not a total failure
+    assert len(calls) == 2  # both attempted; the second failed but didn't abort the first
