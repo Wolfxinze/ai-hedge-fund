@@ -9,6 +9,7 @@
 
 import argparse
 
+from src.serenity.adapters.gather import gather_references
 from src.serenity.grading import SCORECARD_DIMENSIONS
 from src.serenity.integrate import apply_serenity_to_pool
 from src.serenity.research import build_record
@@ -41,6 +42,41 @@ def _cmd_research(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_discover(args: argparse.Namespace) -> int:
+    """Auto-populate evidence by fanning the source adapters for a ticker, then build one
+    research record per source (each with that source's correct fetch headers). The actual
+    document bodies are fetched through the SSRF-guarded fetcher (fetch_missing=True)."""
+    Base.metadata.create_all(bind=engine)
+    keywords = [k.strip() for k in args.keywords.split(",") if k.strip()]
+    sources = tuple(s.strip() for s in args.sources.split(",") if s.strip())
+    scorecard = _parse_scorecard(args.scorecard)
+    result = gather_references(args.ticker, keywords=keywords, sources=sources, max_per_source=args.max_per_source)
+    if not result.references:
+        print(f"discover: no allowlisted evidence found for {args.ticker} across {','.join(sources)}")
+        return 0
+    built = 0
+    with session_scope() as s:
+        for fetch_headers, refs in result.groups:
+            if not refs:
+                continue
+            record = build_record(
+                s,
+                theme=args.theme,
+                ticker=args.ticker,
+                platform_key=args.platform,
+                chain_layer=args.chain_layer,
+                bottleneck_hypothesis=args.hypothesis,
+                scorecard=scorecard,
+                references=refs,
+                fetch_missing=True,
+                fetch_headers=fetch_headers,
+            )
+            built += 1
+            print(f"record id={record.id} ticker={record.ticker} grade={record.evidence_grade} " f"score={record.serenity_score} refs={len(refs)}")
+    print(f"discover: built {built} record(s) for {args.ticker} from {len(result.references)} reference(s)")
+    return 0
+
+
 def _cmd_apply(args: argparse.Namespace) -> int:
     Base.metadata.create_all(bind=engine)
     with session_scope() as s:
@@ -64,6 +100,18 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--excerpt", help="fetched text excerpt (Phase 0: user-provided)")
     r.add_argument("--scorecard", required=True, help="5 ints 0-4: " + ",".join(SCORECARD_DIMENSIONS))
     r.set_defaults(func=_cmd_research)
+
+    d = sub.add_parser("discover", help="auto-populate evidence by fanning source adapters for a ticker")
+    d.add_argument("--theme", required=True)
+    d.add_argument("--ticker", required=True)
+    d.add_argument("--keywords", required=True, help="comma-separated claim keywords (the text the evidence must substantiate)")
+    d.add_argument("--platform")
+    d.add_argument("--chain-layer", dest="chain_layer")
+    d.add_argument("--hypothesis")
+    d.add_argument("--sources", default="edgar,federal_register", help="comma-separated subset of sources")
+    d.add_argument("--max-per-source", type=int, default=3, dest="max_per_source")
+    d.add_argument("--scorecard", required=True, help="5 ints 0-4: " + ",".join(SCORECARD_DIMENSIONS))
+    d.set_defaults(func=_cmd_discover)
 
     a = sub.add_parser("apply", help="fold serenity scores into a pool and re-rank (v3-5comp)")
     a.add_argument("--platform", required=True)
