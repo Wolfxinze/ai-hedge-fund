@@ -1,0 +1,112 @@
+"""Phase 7c: the `serenity research --patent` CLI wiring. OFFLINE — build_record + the DB
+session are stubbed; the real (network-free) patents adapter runs so the test exercises the
+true integration. Verifies a --patent number becomes a patents.google.com reference with
+fetch_missing=True + empty headers, an invalid number is dropped, and a --url-only call stays
+offline (fetch_missing=False), preserving existing behavior.
+"""
+
+import contextlib
+import types
+
+import pytest
+
+from src.serenity import cli
+
+
+@pytest.fixture(autouse=True)
+def _no_db(monkeypatch):
+    monkeypatch.setattr(cli.Base.metadata, "create_all", lambda **k: None)
+    monkeypatch.setattr(cli, "session_scope", lambda: contextlib.nullcontext(object()))
+
+
+def _capture_build_record(monkeypatch):
+    calls = []
+
+    def fake_build_record(session, **kw):
+        calls.append(kw)
+        return types.SimpleNamespace(id=1, ticker=kw.get("ticker"), evidence_grade="C", serenity_score=0, recommended_action="hold")
+
+    monkeypatch.setattr(cli, "build_record", fake_build_record)
+    return calls
+
+
+def test_research_patent_flag_builds_patent_reference(monkeypatch):
+    calls = _capture_build_record(monkeypatch)
+    rc = cli.main(["research", "--theme", "t", "--patent", "US6285999B1", "--claim", "node ranking", "--scorecard", "4,3,4,2,3"])
+    assert rc == 0
+    assert len(calls) == 1
+    kw = calls[0]
+    assert kw["fetch_missing"] is True  # patent body is not user-supplied → must be fetched
+    assert kw["fetch_headers"] == {}  # Google Patents needs no User-Agent
+    patent_refs = [r for r in kw["references"] if "patents.google.com" in r["source_url"]]
+    assert patent_refs == [{"source_url": "https://patents.google.com/patent/US6285999B1/en", "claim_summary": "node ranking"}]
+
+
+def test_research_url_only_stays_offline(monkeypatch):
+    """No --patent → existing behavior preserved: offline (fetch_missing False, no headers)."""
+    calls = _capture_build_record(monkeypatch)
+    rc = cli.main([
+        "research", "--theme", "t", "--url", "https://www.sec.gov/x",
+        "--claim", "c", "--excerpt", "e", "--scorecard", "4,3,4,2,3",
+    ])
+    assert rc == 0
+    kw = calls[0]
+    assert kw["fetch_missing"] is False
+    assert kw["fetch_headers"] is None
+    assert kw["references"] == [{"source_url": "https://www.sec.gov/x", "claim_summary": "c", "excerpt": "e"}]
+
+
+def test_research_all_invalid_patents_no_url_exits_2(monkeypatch, capsys):
+    """An all-rejected --patent set with no other evidence must fail loud (exit 2, no record),
+    not silently build a confident-looking empty record — parity with discover's all-errored path."""
+    calls = _capture_build_record(monkeypatch)
+    rc = cli.main(["research", "--theme", "t", "--patent", "US1234/../evil", "--claim", "c", "--scorecard", "4,3,4,2,3"])
+    assert rc == 2
+    assert calls == []  # no record built when every supplied number was invalid
+    assert "invalid" in capsys.readouterr().err.lower()
+
+
+def test_research_some_patents_rejected_warns(monkeypatch, capsys):
+    """A partially-valid set still builds, but the rejected count is surfaced to stderr."""
+    calls = _capture_build_record(monkeypatch)
+    rc = cli.main([
+        "research", "--theme", "t",
+        "--patent", "US6285999B1", "--patent", "US1234/../evil",
+        "--claim", "c", "--scorecard", "4,3,4,2,3",
+    ])
+    assert rc == 0
+    urls = [r["source_url"] for r in calls[0]["references"] if "patents.google.com" in r["source_url"]]
+    assert urls == ["https://patents.google.com/patent/US6285999B1/en"]
+    err = capsys.readouterr().err
+    assert "1 of 2" in err and "rejected" in err
+
+
+def test_research_url_plus_patent_warns_and_fetches(monkeypatch, capsys):
+    """Mixed --url (no --excerpt) + --patent: both refs merge, fetch_missing flips True, and the
+    --url-fetched-with-no-headers behavior change is surfaced loudly (not silent)."""
+    calls = _capture_build_record(monkeypatch)
+    rc = cli.main([
+        "research", "--theme", "t",
+        "--url", "https://www.sec.gov/x", "--patent", "US6285999B1",
+        "--claim", "c", "--scorecard", "4,3,4,2,3",
+    ])
+    assert rc == 0
+    kw = calls[0]
+    assert kw["fetch_missing"] is True
+    hosts = {r["source_url"] for r in kw["references"]}
+    assert "https://www.sec.gov/x" in hosts and "https://patents.google.com/patent/US6285999B1/en" in hosts
+    assert "--url" in capsys.readouterr().err  # mixed-mode header warning surfaced
+
+
+def test_research_multiple_patents(monkeypatch):
+    calls = _capture_build_record(monkeypatch)
+    cli.main([
+        "research", "--theme", "t",
+        "--patent", "US6285999B1", "--patent", "EP1234567B1",
+        "--claim", "k", "--scorecard", "4,3,4,2,3",
+    ])
+    urls = [r["source_url"] for r in calls[0]["references"] if "patents.google.com" in r["source_url"]]
+    assert urls == [
+        "https://patents.google.com/patent/US6285999B1/en",
+        "https://patents.google.com/patent/EP1234567B1/en",
+    ]
