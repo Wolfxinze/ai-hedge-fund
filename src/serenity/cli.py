@@ -12,6 +12,7 @@ import logging
 import sys
 
 from src.serenity.adapters.gather import gather_references
+from src.serenity.adapters.patents import build_patent_references, patents_fetch_headers
 from src.serenity.grading import SCORECARD_DIMENSIONS
 from src.serenity.integrate import apply_serenity_to_pool
 from src.serenity.research import build_record
@@ -31,6 +32,18 @@ def _parse_scorecard(raw: str) -> dict:
 def _cmd_research(args: argparse.Namespace) -> int:
     Base.metadata.create_all(bind=engine)
     references = [{"source_url": u, "claim_summary": args.claim, "excerpt": args.excerpt} for u in args.url]
+    # --patent: number-driven Google Patents evidence. The adapter validates each number and
+    # builds the patents.google.com URL; the body is fetched downstream by build_record
+    # (fetch_missing=True) and gated by is_substantiated. claim_summary is keyword-only (drawn
+    # from --claim, same policy as the edgar/fedreg adapters).
+    references.extend(
+        build_patent_references(args.patent, keywords=(args.claim or "").split(), max_patents=len(args.patent) or 1)
+    )
+    # Patent bodies are never user-supplied, so they must be fetched; enabling fetch_missing only
+    # when --patent is present preserves the existing offline behavior for --url-only calls. Google
+    # Patents needs no header, so fetch_headers stays {} (patents_fetch_headers).
+    fetch_missing = bool(args.patent)
+    fetch_headers = patents_fetch_headers() if args.patent else None
     with session_scope() as s:
         record = build_record(
             s,
@@ -41,6 +54,8 @@ def _cmd_research(args: argparse.Namespace) -> int:
             bottleneck_hypothesis=args.hypothesis,
             scorecard=_parse_scorecard(args.scorecard),
             references=references,
+            fetch_missing=fetch_missing,
+            fetch_headers=fetch_headers,
         )
         print(f"record id={record.id} ticker={record.ticker} grade={record.evidence_grade} " f"score={record.serenity_score} action={record.recommended_action}")
     return 0
@@ -120,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--chain-layer", dest="chain_layer")
     r.add_argument("--hypothesis")
     r.add_argument("--url", action="append", default=[], help="evidence URL (repeatable)")
+    r.add_argument("--patent", action="append", default=[], dest="patent", help="patent number as evidence, e.g. US6285999B1 (repeatable); body fetched via the SSRF-guarded fetcher")
     r.add_argument("--claim", help="claim summary the evidence must substantiate")
     r.add_argument("--excerpt", help="fetched text excerpt (Phase 0: user-provided)")
     r.add_argument("--scorecard", required=True, help="5 ints 0-4: " + ",".join(SCORECARD_DIMENSIONS))
