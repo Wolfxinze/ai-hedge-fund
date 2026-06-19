@@ -31,10 +31,12 @@ _MIN_EXCERPT_WORDS = 8
 
 def host_of(url: str) -> str | None:
     try:
-        netloc = urlparse(url).netloc.lower()
+        parsed = urlparse(url)
     except ValueError:
         return None
-    return netloc.split("@")[-1].split(":")[0] or None
+    if "@" in (parsed.netloc or ""):  # any userinfo — exact parity with the fetcher's _gate '@'-reject
+        return None
+    return parsed.netloc.lower().split(":")[0] or None
 
 
 def source_type_for_host(host: str | None, allowlist: dict[str, SourceType] = DEFAULT_HOST_ALLOWLIST) -> SourceType:

@@ -93,6 +93,15 @@ def test_build_references_emits_only_on_host_html_urls(monkeypatch):
     assert f.calls[0]["max_bytes"] == fr._JSON_MAX_BYTES
 
 
+def test_is_federal_register_host_rejects_userinfo():
+    """Any userinfo ('@') must return False — exact parity with the fetcher's _gate '@'-reject,
+    incl. the bare/empty-userinfo case a username/password check would miss."""
+    assert _is_federal_register_host("https://evil@federalregister.gov/x") is False
+    assert _is_federal_register_host("https://federalregister.gov@evil.com/x") is False  # inversion
+    assert _is_federal_register_host("https://@federalregister.gov/x") is False  # bare/empty userinfo
+    assert _is_federal_register_host("https://www.federalregister.gov/documents/1") is True  # clean
+
+
 def test_term_cannot_change_request_host(monkeypatch):
     """A term with query-significant chars is urlencoded into the VALUE; host stays fixed."""
     f = _wire(monkeypatch, _ok(json.dumps({"results": []})))

@@ -13,11 +13,12 @@ import sys
 
 from src.serenity.adapters.gather import gather_references
 from src.serenity.adapters.patents import build_patent_references, patents_fetch_headers
+from src.serenity.evidence import host_of, source_type_for_host
 from src.serenity.grading import SCORECARD_DIMENSIONS
 from src.serenity.integrate import apply_serenity_to_pool
 from src.serenity.research import build_record
 from src.storage import engine, session_scope
-from src.storage.models import Base
+from src.storage.models import Base, SourceType
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,11 @@ def _parse_scorecard(raw: str) -> dict:
 def _cmd_research(args: argparse.Namespace) -> int:
     Base.metadata.create_all(bind=engine)
     references = [{"source_url": u, "claim_summary": args.claim, "excerpt": args.excerpt} for u in args.url]
+    # Observability (Phase-0 contract: never hard-gate user-supplied URLs): warn when a --url host is
+    # off the source allowlist, so the user knows that reference will be UNVERIFIED and cannot substantiate.
+    for u in args.url:
+        if source_type_for_host(host_of(u)) is SourceType.UNVERIFIED:
+            print(f"research: WARNING {u!r} host is not on the source allowlist — evidence will be UNVERIFIED and cannot substantiate", file=sys.stderr)
     # --patent: number-driven Google Patents evidence. The adapter validates each number and
     # builds the patents.google.com URL; the body is fetched downstream by build_record
     # (fetch_missing=True) and gated by is_substantiated. claim_summary is keyword-only (drawn

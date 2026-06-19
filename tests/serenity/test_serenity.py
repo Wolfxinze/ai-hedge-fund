@@ -10,8 +10,19 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import src.storage.models as m
-from src.serenity.evidence import classify_reference, is_substantiated, source_type_for_host
-from src.serenity.grading import EvidenceGrade, grade_evidence, normalize_scorecard, recommended_action, serenity_score
+from src.serenity.evidence import (
+    classify_reference,
+    host_of,
+    is_substantiated,
+    source_type_for_host,
+)
+from src.serenity.grading import (
+    EvidenceGrade,
+    grade_evidence,
+    normalize_scorecard,
+    recommended_action,
+    serenity_score,
+)
 from src.serenity.integrate import apply_serenity_to_pool
 from src.serenity.research import build_record
 from src.storage.models import RecommendedAction, SourceType
@@ -32,6 +43,18 @@ def test_source_type_is_host_derived():
     assert source_type_for_host("sec.gov") == SourceType.FILING
     assert source_type_for_host("patents.google.com") == SourceType.PATENT
     assert source_type_for_host("randomblog.com") == SourceType.UNVERIFIED
+
+
+def test_host_of_rejects_userinfo():
+    """A userinfo-bearing URL with an allowlisted post-@ host must return None (not the host) so it
+    classifies UNVERIFIED — parity with the fetcher's '@'-reject; a userinfo URL is never a real
+    allowlisted source, only record pollution."""
+    assert host_of("https://evil.com@sec.gov/filing.htm") is None  # inversion: trusted host as userinfo
+    assert source_type_for_host(host_of("https://evil.com@sec.gov/filing.htm")) == SourceType.UNVERIFIED
+    assert host_of("https://evil@sec.gov/x") is None  # attacker domain in userinfo
+    assert host_of("https://@sec.gov/x") is None  # bare/empty userinfo (username='' is falsy)
+    assert host_of("https://www.sec.gov/filing.htm") == "www.sec.gov"  # clean URL unchanged
+    assert host_of("https://www.sec.gov:443/x") == "www.sec.gov"  # port stripped, no regression
 
 
 def test_substantiation_overlap():
