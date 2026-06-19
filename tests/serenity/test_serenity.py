@@ -54,6 +54,7 @@ def test_host_of_rejects_userinfo():
     assert host_of("https://evil@sec.gov/x") is None  # attacker domain in userinfo
     assert host_of("https://@sec.gov/x") is None  # bare/empty userinfo (username='' is falsy)
     assert host_of("https://www.sec.gov/filing.htm") == "www.sec.gov"  # clean URL unchanged
+    assert host_of("https://www.sec.gov:443/x") == "www.sec.gov"  # port stripped, no regression
 
 
 def test_substantiation_overlap():

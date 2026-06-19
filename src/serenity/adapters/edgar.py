@@ -49,8 +49,9 @@ _MAX_FILINGS_CAP = 5  # hard ceiling so a single record can never burst EDGAR's 
 # SEC EDGAR's access policy accepts a project URL in place of a contact email; use the repo URL so the
 # unset-env fallback never sends a placeholder address (which risks SEC rate-limiting / an access ban).
 _DEFAULT_USER_AGENT = "ai-hedge-fund serenity-research https://github.com/Wolfxinze/ai-hedge-fund"
-# Printable ASCII only — rejects CRLF/control chars so a caller- or env-supplied UA can't inject headers.
-_UA_RE = re.compile(r"^[\x20-\x7E]+$")
+# Printable ASCII only (no CRLF/control chars) — applied with .fullmatch (below) so a caller- or
+# env-supplied UA can't inject headers. No ^...$ anchors: fullmatch already anchors both ends.
+_UA_RE = re.compile(r"[\x20-\x7E]+")
 # The EDGAR index JSONs are larger than an evidence excerpt. The default 2 MB filing cap
 # would truncate them mid-object, json.loads would then fail, and CIK resolution would
 # silently zero out. Give them headroom so a legitimately large index parses whole. (A
@@ -115,8 +116,9 @@ def _normalize_cik(cik: object) -> str | None:
 
 def _is_sec_host(url: str) -> bool:
     """True iff ``url``'s host is sec.gov or a *.sec.gov subdomain AND it carries no userinfo
-    (defense-in-depth: the adapter must never emit an off-sec.gov or userinfo-bearing source_url;
-    fetch_excerpt rejects '@' too). Parity with _is_federal_register_host."""
+    (defense-in-depth: the adapter must never emit an off-sec.gov or userinfo-bearing source_url).
+    The '@'-in-netloc check is exact parity with the fetcher's _gate (stricter than a
+    username/password check, which misses bare '@')."""
     try:
         parts = urlsplit(url)
     except ValueError:

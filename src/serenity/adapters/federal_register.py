@@ -73,7 +73,7 @@ def _is_federal_register_host(url: str) -> bool:
         parts = urlsplit(url)
     except ValueError:
         return False
-    if parts.username or parts.password:  # userinfo — the fetcher rejects '@'; stay consistent
+    if "@" in (parts.netloc or ""):  # any userinfo — exact parity with the fetcher's _gate '@'-reject
         return False
     host = (parts.hostname or "").lower()
     return host == _FR_HOST or host.endswith("." + _FR_HOST)

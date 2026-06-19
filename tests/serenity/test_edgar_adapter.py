@@ -376,9 +376,12 @@ def test_user_agent_accepts_valid_printable_ua(monkeypatch):
 
 
 def test_default_user_agent_contains_no_placeholder_email(monkeypatch):
-    """The fallback UA must never send a fake address to SEC EDGAR (risks rate-limit/ban)."""
+    """The fallback UA must never send a fake address to SEC EDGAR (risks rate-limit/ban), but must
+    still carry a real contact (the repo URL) — not a contactless UA, which SEC also rejects."""
     monkeypatch.delenv("SEC_EDGAR_USER_AGENT", raising=False)
-    assert "example.com" not in edgar_fetch_headers()["User-Agent"]
+    ua = edgar_fetch_headers()["User-Agent"]
+    assert "example.com" not in ua
+    assert "github.com" in ua  # pins that the fallback still carries a usable contact
 
 
 def test_user_agent_unset_emits_warning(monkeypatch, caplog):
