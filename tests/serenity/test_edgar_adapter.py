@@ -360,6 +360,14 @@ def test_user_agent_rejects_crlf_falls_back_to_default(monkeypatch, caplog):
     assert any("CRLF" in r.getMessage() or "non-printable" in r.getMessage() for r in caplog.records)
 
 
+def test_user_agent_rejects_trailing_newline(monkeypatch):
+    """A UA ending in a bare '\\n' must be rejected: '$' matches before a trailing newline, so
+    .match would leak it into the header — pins the .fullmatch anchoring (a .match regression is RED)."""
+    monkeypatch.delenv("SEC_EDGAR_USER_AGENT", raising=False)
+    assert "\n" not in edgar_fetch_headers("valid-ua\n")["User-Agent"]
+    assert "\r" not in edgar_fetch_headers("valid-ua\r")["User-Agent"]
+
+
 def test_user_agent_accepts_valid_printable_ua(monkeypatch):
     """A printable-ASCII UA passes through unchanged (a future over-eager regex must not reject it)."""
     monkeypatch.delenv("SEC_EDGAR_USER_AGENT", raising=False)
@@ -378,26 +386,31 @@ def test_user_agent_unset_emits_warning(monkeypatch, caplog):
     monkeypatch.delenv("SEC_EDGAR_USER_AGENT", raising=False)
     with caplog.at_level(logging.WARNING, logger="src.serenity.adapters.edgar"):
         edgar_fetch_headers()
-    assert any(r.levelno == logging.WARNING for r in caplog.records)
+    # Assert the UNSET-path message specifically, so it can't be satisfied by the injection WARNING.
+    assert any(r.levelno == logging.WARNING and "unset" in r.getMessage() for r in caplog.records)
 
 
 def test_is_sec_host_rejects_userinfo():
-    """A userinfo-bearing URL with a *.sec.gov post-@ host must return False (parity with the
-    fetcher's '@'-reject and _is_federal_register_host) so discover_filings never emits it."""
+    """Any userinfo ('@') must return False — exact parity with the fetcher's _gate '@'-reject —
+    so discover_filings never emits it. Covers attacker domain in userinfo, the dangerous
+    trusted-host-in-userinfo inversion, and bare/empty userinfo."""
     assert _is_sec_host("https://evil@sec.gov/x") is False
     assert _is_sec_host("https://evil@data.sec.gov/submissions/x.json") is False
+    assert _is_sec_host("https://sec.gov@evil.com/x") is False  # inversion: trusted host as userinfo
+    assert _is_sec_host("https://@sec.gov/x") is False  # bare/empty userinfo (username='' is falsy)
     assert _is_sec_host("https://www.sec.gov/Archives/edgar/data/x.htm") is True  # clean URL still passes
 
 
-def test_bad_content_type_logged_at_warning(monkeypatch, caplog):
-    """A 200 non-JSON body (block page / API-shape change) is actionable → WARNING, not INFO —
-    parity with federal_register._fetch_json's actionable-reason leveling."""
+@pytest.mark.parametrize("reason", ["bad_content_type", "too_large", "blocked_redirect"])
+def test_actionable_reasons_logged_at_warning(monkeypatch, caplog, reason):
+    """Each actionable reason (block page / oversize / blocked redirect — API-shape/operational
+    signal) is WARNING, not INFO — parity with federal_register. Parametrized so dropping a member
+    of _ACTIONABLE_REASONS goes RED."""
     monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "test test@example.com")
-    bad_ct = FetchResult(False, None, "https://www.sec.gov/x", 200, "text/html", "bad_content_type")
-    _wire(monkeypatch, tickers=bad_ct)
+    _wire(monkeypatch, tickers=FetchResult(False, None, "https://www.sec.gov/x", 200, "text/html", reason))
     with caplog.at_level(logging.INFO, logger="src.serenity.adapters.edgar"):
         assert resolve_cik("AAPL") is None
-    assert any(r.levelno == logging.WARNING and "bad_content_type" in r.getMessage() for r in caplog.records)
+    assert any(r.levelno == logging.WARNING and reason in r.getMessage() for r in caplog.records)
 
 
 def test_connect_error_stays_info(monkeypatch, caplog):

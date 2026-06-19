@@ -49,8 +49,10 @@ def test_host_of_rejects_userinfo():
     """A userinfo-bearing URL with an allowlisted post-@ host must return None (not the host) so it
     classifies UNVERIFIED — parity with the fetcher's '@'-reject; a userinfo URL is never a real
     allowlisted source, only record pollution."""
-    assert host_of("https://evil.com@sec.gov/filing.htm") is None
+    assert host_of("https://evil.com@sec.gov/filing.htm") is None  # inversion: trusted host as userinfo
     assert source_type_for_host(host_of("https://evil.com@sec.gov/filing.htm")) == SourceType.UNVERIFIED
+    assert host_of("https://evil@sec.gov/x") is None  # attacker domain in userinfo
+    assert host_of("https://@sec.gov/x") is None  # bare/empty userinfo (username='' is falsy)
     assert host_of("https://www.sec.gov/filing.htm") == "www.sec.gov"  # clean URL unchanged
 
 

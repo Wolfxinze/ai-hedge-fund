@@ -34,7 +34,7 @@ def host_of(url: str) -> str | None:
         parsed = urlparse(url)
     except ValueError:
         return None
-    if parsed.username or parsed.password:  # userinfo — the fetcher rejects '@'; stay consistent
+    if "@" in (parsed.netloc or ""):  # any userinfo — exact parity with the fetcher's _gate '@'-reject
         return None
     return parsed.netloc.lower().split(":")[0] or None
 

@@ -84,7 +84,9 @@ def _user_agent(explicit: str | None) -> str:
             "'Name email@example.com' to comply with SEC EDGAR's access policy."
         )
         return _DEFAULT_USER_AGENT
-    if not _UA_RE.match(ua):
+    # fullmatch (not match): '$' matches before a trailing '\n', so .match would leak a UA ending
+    # in a newline straight into the header — the exact CRLF case this guard exists to block.
+    if not _UA_RE.fullmatch(ua):
         logger.warning(
             "SEC_EDGAR_USER_AGENT contains non-printable or CRLF characters; falling back to "
             "the default UA to prevent header injection."
@@ -119,7 +121,7 @@ def _is_sec_host(url: str) -> bool:
         parts = urlsplit(url)
     except ValueError:
         return False
-    if parts.username or parts.password:  # userinfo — the fetcher rejects '@'; stay consistent
+    if "@" in (parts.netloc or ""):  # any userinfo — exact parity with the fetcher's _gate '@'-reject
         return False
     host = (parts.hostname or "").lower()
     return host == "sec.gov" or host.endswith(".sec.gov")
