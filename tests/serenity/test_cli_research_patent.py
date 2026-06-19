@@ -98,6 +98,32 @@ def test_research_url_plus_patent_warns_and_fetches(monkeypatch, capsys):
     assert "--url" in capsys.readouterr().err  # mixed-mode header warning surfaced
 
 
+def test_research_off_allowlist_url_warns_but_builds(monkeypatch, capsys):
+    """Off-allowlist --url → stderr WARNING naming the URL, but the record is still built (rc 0).
+    Phase-0 contract: never hard-gate user-supplied URLs; only emit observability."""
+    calls = _capture_build_record(monkeypatch)
+    rc = cli.main([
+        "research", "--theme", "t", "--url", "https://example.com/report",
+        "--claim", "c", "--excerpt", "e", "--scorecard", "4,3,4,2,3",
+    ])
+    assert rc == 0
+    assert len(calls) == 1  # record still built (not gated)
+    err = capsys.readouterr().err
+    assert "WARNING" in err and "example.com/report" in err and "UNVERIFIED" in err
+
+
+def test_research_allowlisted_url_no_warning(monkeypatch, capsys):
+    """An allowlisted --url (sec.gov) must NOT be flagged as off-allowlist."""
+    calls = _capture_build_record(monkeypatch)
+    rc = cli.main([
+        "research", "--theme", "t", "--url", "https://www.sec.gov/filing/x",
+        "--claim", "c", "--excerpt", "e", "--scorecard", "4,3,4,2,3",
+    ])
+    assert rc == 0 and len(calls) == 1
+    err = capsys.readouterr().err
+    assert "UNVERIFIED" not in err and "WARNING" not in err
+
+
 def test_research_multiple_patents(monkeypatch):
     calls = _capture_build_record(monkeypatch)
     cli.main([

@@ -344,3 +344,66 @@ def test_normalize_cik_guards():
     assert _normalize_cik("../evil") is None
     assert _normalize_cik("320193") == "0000320193"
     assert _normalize_cik(320193) == "0000320193"
+
+
+# ── deferred #13/#15 hardening: UA validation, default UA, userinfo parity, reason leveling ──
+
+
+def test_user_agent_rejects_crlf_falls_back_to_default(monkeypatch, caplog):
+    """A UA with CRLF must be rejected (header injection) → default used + WARNING, never raises."""
+    monkeypatch.delenv("SEC_EDGAR_USER_AGENT", raising=False)
+    bad_ua = "injected\r\nX-Evil: pwned"
+    with caplog.at_level(logging.WARNING, logger="src.serenity.adapters.edgar"):
+        result = edgar_fetch_headers(bad_ua)
+    assert result["User-Agent"] != bad_ua  # the injected value never passes through
+    assert result["User-Agent"]  # falls back to a safe non-empty UA
+    assert any("CRLF" in r.getMessage() or "non-printable" in r.getMessage() for r in caplog.records)
+
+
+def test_user_agent_accepts_valid_printable_ua(monkeypatch):
+    """A printable-ASCII UA passes through unchanged (a future over-eager regex must not reject it)."""
+    monkeypatch.delenv("SEC_EDGAR_USER_AGENT", raising=False)
+    good_ua = "acme-research contact@acme.com"
+    assert edgar_fetch_headers(good_ua) == {"User-Agent": good_ua}
+
+
+def test_default_user_agent_contains_no_placeholder_email(monkeypatch):
+    """The fallback UA must never send a fake address to SEC EDGAR (risks rate-limit/ban)."""
+    monkeypatch.delenv("SEC_EDGAR_USER_AGENT", raising=False)
+    assert "example.com" not in edgar_fetch_headers()["User-Agent"]
+
+
+def test_user_agent_unset_emits_warning(monkeypatch, caplog):
+    """The unset path must still WARN so the misconfiguration stays observable."""
+    monkeypatch.delenv("SEC_EDGAR_USER_AGENT", raising=False)
+    with caplog.at_level(logging.WARNING, logger="src.serenity.adapters.edgar"):
+        edgar_fetch_headers()
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_is_sec_host_rejects_userinfo():
+    """A userinfo-bearing URL with a *.sec.gov post-@ host must return False (parity with the
+    fetcher's '@'-reject and _is_federal_register_host) so discover_filings never emits it."""
+    assert _is_sec_host("https://evil@sec.gov/x") is False
+    assert _is_sec_host("https://evil@data.sec.gov/submissions/x.json") is False
+    assert _is_sec_host("https://www.sec.gov/Archives/edgar/data/x.htm") is True  # clean URL still passes
+
+
+def test_bad_content_type_logged_at_warning(monkeypatch, caplog):
+    """A 200 non-JSON body (block page / API-shape change) is actionable → WARNING, not INFO —
+    parity with federal_register._fetch_json's actionable-reason leveling."""
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "test test@example.com")
+    bad_ct = FetchResult(False, None, "https://www.sec.gov/x", 200, "text/html", "bad_content_type")
+    _wire(monkeypatch, tickers=bad_ct)
+    with caplog.at_level(logging.INFO, logger="src.serenity.adapters.edgar"):
+        assert resolve_cik("AAPL") is None
+    assert any(r.levelno == logging.WARNING and "bad_content_type" in r.getMessage() for r in caplog.records)
+
+
+def test_connect_error_stays_info(monkeypatch, caplog):
+    """A benign miss (connect_error) stays INFO; only actionable reasons escalate to WARNING."""
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "test test@example.com")
+    _wire(monkeypatch, tickers=_fail("connect_error"))
+    with caplog.at_level(logging.INFO, logger="src.serenity.adapters.edgar"):
+        assert resolve_cik("AAPL") is None
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)

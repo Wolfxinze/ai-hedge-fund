@@ -46,12 +46,19 @@ _DOCUMENT_RE = re.compile(r"^[A-Za-z0-9._\-]{1,128}$")
 
 _DEFAULT_FORMS: tuple[str, ...] = ("10-K", "10-Q", "8-K")
 _MAX_FILINGS_CAP = 5  # hard ceiling so a single record can never burst EDGAR's ~10 req/s
-_DEFAULT_USER_AGENT = "ai-hedge-fund serenity-research contact@example.com"
+# SEC EDGAR's access policy accepts a project URL in place of a contact email; use the repo URL so the
+# unset-env fallback never sends a placeholder address (which risks SEC rate-limiting / an access ban).
+_DEFAULT_USER_AGENT = "ai-hedge-fund serenity-research https://github.com/Wolfxinze/ai-hedge-fund"
+# Printable ASCII only — rejects CRLF/control chars so a caller- or env-supplied UA can't inject headers.
+_UA_RE = re.compile(r"^[\x20-\x7E]+$")
 # The EDGAR index JSONs are larger than an evidence excerpt. The default 2 MB filing cap
 # would truncate them mid-object, json.loads would then fail, and CIK resolution would
 # silently zero out. Give them headroom so a legitimately large index parses whole. (A
 # body that still exceeds this is truncated → json.loads fails → clean degrade to None.)
 _JSON_MAX_BYTES = 8_000_000
+# Fetch-failure reasons that signal an API-shape change / block page (vs a benign miss) → WARNING.
+# Parity with federal_register._fetch_json's actionable-reason leveling.
+_ACTIONABLE_REASONS = {"bad_content_type", "too_large", "blocked_redirect"}
 
 
 @dataclass(frozen=True)
@@ -77,6 +84,12 @@ def _user_agent(explicit: str | None) -> str:
             "'Name email@example.com' to comply with SEC EDGAR's access policy."
         )
         return _DEFAULT_USER_AGENT
+    if not _UA_RE.match(ua):
+        logger.warning(
+            "SEC_EDGAR_USER_AGENT contains non-printable or CRLF characters; falling back to "
+            "the default UA to prevent header injection."
+        )
+        return _DEFAULT_USER_AGENT
     return ua
 
 
@@ -99,12 +112,16 @@ def _normalize_cik(cik: object) -> str | None:
 
 
 def _is_sec_host(url: str) -> bool:
-    """True iff ``url``'s host is sec.gov or a *.sec.gov subdomain (defense-in-depth: the
-    adapter must never emit an off-sec.gov source_url; fetch_excerpt re-checks too)."""
+    """True iff ``url``'s host is sec.gov or a *.sec.gov subdomain AND it carries no userinfo
+    (defense-in-depth: the adapter must never emit an off-sec.gov or userinfo-bearing source_url;
+    fetch_excerpt rejects '@' too). Parity with _is_federal_register_host."""
     try:
-        host = (urlsplit(url).hostname or "").lower()
+        parts = urlsplit(url)
     except ValueError:
         return False
+    if parts.username or parts.password:  # userinfo — the fetcher rejects '@'; stay consistent
+        return False
+    host = (parts.hostname or "").lower()
     return host == "sec.gov" or host.endswith(".sec.gov")
 
 
@@ -128,7 +145,8 @@ def _fetch_json(url: str, *, allowlist: dict[str, SourceType], user_agent: str) 
             # A 403/429 is the failure the User-Agent exists to prevent (missing/garbage UA,
             # or an IP rate-limit ban) — it is operationally actionable, so it must be LOUDER
             # than a benign "this ticker has no such filing" miss.
-            level = logging.WARNING if result.status in (403, 429) else logging.INFO
+            actionable = result.status in (403, 429) or result.reason in _ACTIONABLE_REASONS
+            level = logging.WARNING if actionable else logging.INFO
             logger.log(level, "edgar fetch not ok (%s, http %s): %s", result.reason, result.status, url)
             return None
         return json.loads(result.excerpt)
