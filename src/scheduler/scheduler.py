@@ -36,9 +36,10 @@ _MONITOR_MISFIRE_SECONDS = 600
 SessionFactory = Callable[[], AbstractContextManager[Session]]
 
 
-def _default_run_analysts_factory() -> RunAnalysts:
+def default_run_analysts_factory() -> RunAnalysts:
     """Production scoring runner, imported LAZILY: the analyst/LLM stack is heavy, so it is pulled
-    only when the refresh job actually fires — never at app import/startup."""
+    only when the refresh job actually fires — never at app import/startup. Public so the Phase-9
+    refresh API and the scheduler share ONE definition of 'the production runner' (no triplication)."""
     from functools import partial
 
     from src.observing_pools.scoring_graph import run_scoring_analysts
@@ -61,7 +62,7 @@ def build_scheduler(
     whole scheduler); an invalid OBSERVING_POOL_REFRESH_CRON raises ValueError (the caller —
     main.py startup — catches it, logs, and the app still starts without the scheduler)."""
     scheduler = BackgroundScheduler(executors={"default": ThreadPoolExecutor(max_workers=2)}, timezone="UTC")
-    raf = run_analysts_factory or _default_run_analysts_factory
+    raf = run_analysts_factory or default_run_analysts_factory
 
     refresh_cron = os.environ.get("OBSERVING_POOL_REFRESH_CRON", "0 8 * * 1")
     scheduler.add_job(
