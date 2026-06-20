@@ -201,9 +201,13 @@ def test_get_opportunity_report_by_id(env):
 
 def test_get_report_without_disclaimer_is_refused(env):
     """The serialize_report chokepoint must REFUSE a disclaimer-less report at the GET-by-id route too
-    (§9.9) — fail loud, not a blanked 200. Guards against someone weakening serialize_report."""
+    (§9.9) — fail loud, not a blanked 200. Guards against someone weakening serialize_report.
+
+    The seed uses a non-breaking space: the Phase-11 DB CHECK (whose SQLite trim set is ASCII
+    whitespace) admits it, but serialize_report's Unicode-aware .strip() still refuses it — so this
+    exercises the serialize layer independently of the DB CHECK (the two compose)."""
     with contextlib.closing(env.SessionLocal()) as s:
-        s.add(OpportunityReport(ticker="NVDA", label="mixed", disclaimer="", disclaimer_version=""))
+        s.add(OpportunityReport(ticker="NVDA", label="mixed", disclaimer="\xa0", disclaimer_version="2026-06"))
         s.commit()
         rid = s.query(OpportunityReport).one().id
     with pytest.raises(DisclaimerError):

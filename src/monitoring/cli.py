@@ -9,11 +9,14 @@ keys); on any failure it emits a degraded, disclaimer-carrying report.
 """
 
 import argparse
+import json
+import sys
 from datetime import date
 
 from src.monitoring.runner import create_monitor, run_monitor
+from src.monitoring.serialize import DisclaimerError, serialize_report
 from src.storage import engine, session_scope
-from src.storage.models import Base, MonitorConfig
+from src.storage.models import Base, MonitorConfig, OpportunityReport
 
 
 def _cmd_create(args: argparse.Namespace) -> int:
@@ -41,6 +44,33 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 2 if result.any_degraded else 0
 
 
+def _cmd_export(args: argparse.Namespace) -> int:
+    """Re-project persisted reports through ``serialize_report`` (PRD §13/§20 export).
+
+    Every emitted report passes the disclaimer chokepoint, so a disclaimer-less
+    report can never be exported — the export inherits ``DisclaimerError``. Pure
+    read + project: no analyzing flow, no LLM, no trade path.
+    """
+    Base.metadata.create_all(bind=engine)
+    with session_scope() as s:
+        query = s.query(OpportunityReport).order_by(OpportunityReport.id)
+        if args.name:
+            monitor = s.query(MonitorConfig).filter_by(name=args.name).one_or_none()
+            if monitor is None:
+                print(f"no monitor named '{args.name}'", file=sys.stderr)
+                return 1
+            query = query.filter(OpportunityReport.monitor_id == monitor.id)
+        if args.ticker:
+            query = query.filter(OpportunityReport.ticker == args.ticker.strip().upper())
+        try:
+            payload = [serialize_report(r) for r in query.all()]
+        except DisclaimerError as exc:  # belt-and-suspenders behind the DB CHECK — fail loud, never emit
+            print(f"refusing to export: {exc}", file=sys.stderr)
+            return 2
+    print(json.dumps(payload, indent=2, default=str))
+    return 0
+
+
 def _cmd_list(_args: argparse.Namespace) -> int:
     with session_scope() as s:
         monitors = s.query(MonitorConfig).order_by(MonitorConfig.name).all()
@@ -65,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--name", required=True)
     r.add_argument("--date", default=date.today().isoformat())
     r.set_defaults(func=_cmd_run)
+
+    e = sub.add_parser("export", help="re-project persisted reports as JSON (disclaimer-enforced)")
+    e.add_argument("--name", default=None, help="filter to a monitor by name")
+    e.add_argument("--ticker", default=None, help="filter to a ticker")
+    e.set_defaults(func=_cmd_export)
 
     sub.add_parser("list", help="list monitors").set_defaults(func=_cmd_list)
     return parser
