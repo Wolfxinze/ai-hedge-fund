@@ -8,12 +8,18 @@ Research-only: prints ranked pools, never trade instructions.
 """
 
 import argparse
+import os
 import sys
 from datetime import date
 from functools import partial
 
-from src.observing_pools.pipeline import RefreshConfig, refresh_pool
-from src.observing_pools.platforms import PLATFORM_KEYS, init_platforms
+from src.observing_pools.pipeline import refresh_pool, RefreshConfig
+from src.observing_pools.platforms import init_platforms, PLATFORM_KEYS
+from src.observing_pools.pool_lock import (
+    PoolLockContendedError,
+    PoolLockDatabaseLockedError,
+    refresh_pool_locked,
+)
 from src.observing_pools.universe import load_seed_csv, upsert_candidates
 from src.storage import engine, session_scope
 from src.storage.models import Base, ObservationPoolEntry, RefreshRunStatus
@@ -60,13 +66,25 @@ def _cmd_refresh(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
     )
     Base.metadata.create_all(bind=engine)
-    with session_scope() as s:
-        run = refresh_pool(s, config, runner, end_date=args.end_date)
-        summary = run.summary or {}
-        print(f"refresh status={run.status} platform={args.platform} " f"ranked={summary.get('ranked')} unavailable={summary.get('data_unavailable')} " f"dry_run={args.dry_run}")
-        if summary.get("top_tickers"):
-            print("top:", ", ".join(summary["top_tickers"]))
-        status, error = run.status, run.error
+    if config.dry_run:
+        # dry-run mutates nothing — including no pool_locks row — so it runs UNLOCKED.
+        with session_scope() as s:
+            run = refresh_pool(s, config, runner, end_date=args.end_date)
+            status, error, summary = run.status, run.error, (run.summary or {})
+    else:
+        # PoolLock-guarded: same-platform contention serialises (exit 3); different platforms proceed.
+        try:
+            outcome = refresh_pool_locked(config, runner, end_date=args.end_date, run_id=f"cli-{os.getpid()}")
+        except PoolLockContendedError as exc:
+            print(f"refresh: {exc} — another refresh for '{args.platform}' is already in progress", file=sys.stderr)
+            return 3
+        except PoolLockDatabaseLockedError as exc:
+            print(f"refresh: {exc}", file=sys.stderr)
+            return 1
+        status, error, summary = outcome.status, outcome.error, (outcome.summary or {})
+    print(f"refresh status={status} platform={args.platform} " f"ranked={summary.get('ranked')} unavailable={summary.get('data_unavailable')} " f"dry_run={args.dry_run}")
+    if summary.get("top_tickers"):
+        print("top:", ", ".join(summary["top_tickers"]))
     if error:
         print(error, file=sys.stderr)
     # Loud at the automation boundary: surface PARTIAL (over-budget/degraded) and ERROR.

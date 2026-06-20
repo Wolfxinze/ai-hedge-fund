@@ -11,13 +11,13 @@ Phase-0 steps in their own modules.
 from enum import StrEnum
 
 from sqlalchemy import (
-    JSON,
     Boolean,
     Column,
     DateTime,
     Float,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -140,3 +140,25 @@ class PoolRefreshRun(Base):
     token_cost = Column(JSON, nullable=True)  # {calls, tokens, est_usd}
     summary = Column(JSON, nullable=True)
     error = Column(Text, nullable=True)
+
+
+class PoolLock(Base):
+    """Per-platform refresh lock (PRD §10 / X1). One claim-row per platform_key.
+
+    SQLite cannot do a per-platform ``BEGIN IMMEDIATE`` (whole-DB write lock only), so the
+    sole serialisation mechanism is this claim-row: a refresh acquires the row in a short
+    transaction, runs the long LLM refresh OUTSIDE the lock, then releases it. A crashed
+    holder's row is stolen once ``expires_at`` < now. ``fence`` is a monotonically incrementing
+    generation token captured at claim time and checked at release time: a slow-but-alive
+    holder whose lock was stolen releases as a no-op (fence mismatch) instead of clobbering the
+    new holder — the lost-update guard (must-fix #5). No FK to innovation_platforms: an orphan
+    lock is harmless and simply expires (an ON DELETE CASCADE could silently unblock a running
+    refresh and defeat the fence)."""
+
+    __tablename__ = "pool_locks"
+
+    platform_key = Column(String(50), primary_key=True)
+    locked_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    locked_by = Column(String(128), nullable=False)  # opaque run id (e.g. "cli-<pid>", "scheduler-<platform>-<ts>")
+    expires_at = Column(DateTime(timezone=True), nullable=False)  # locked_at + TTL; the steal-if-expired boundary
+    fence = Column(Integer, nullable=False, default=1)  # generation token; +1 on every successful claim/steal
