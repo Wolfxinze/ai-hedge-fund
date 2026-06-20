@@ -55,6 +55,9 @@ node_modules
 # Outputs
 outputs/
 
+# Eval run transcripts (regenerated every run; dev/CI artifact, never product output)
+evals_runs/
+
 # Database files (users will have their own local databases)
 *.db
 *.db-journal

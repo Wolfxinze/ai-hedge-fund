@@ -8,13 +8,14 @@ the LLM may summarize but never assigns a grade or sets ``source_type`` (PRD
 from enum import StrEnum
 
 from sqlalchemy import (
-    JSON,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
     ForeignKey,
     Integer,
+    JSON,
     String,
     Text,
 )
@@ -50,6 +51,13 @@ class SerenityResearchRecord(Base):
     """One bottleneck research record per theme/candidate."""
 
     __tablename__ = "serenity_research_records"
+    # Defense in depth (PRD §12/§20): NOT NULL admits an empty-string disclaimer;
+    # this CHECK rejects blank/whitespace-only at the DB layer for any path that
+    # bypasses serialization (the serenity GET projection currently does — flagged
+    # for a follow-up serialize_serenity chokepoint).
+    __table_args__ = (
+        CheckConstraint("length(trim(disclaimer)) > 0 AND length(trim(disclaimer_version)) > 0", name="ck_serenity_research_records_disclaimer_nonempty"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     ticker = Column(String(32), nullable=True, index=True)
