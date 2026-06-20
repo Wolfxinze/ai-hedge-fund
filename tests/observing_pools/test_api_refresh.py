@@ -21,6 +21,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import app.backend.routes.observing_pools as op_routes
 import src.observing_pools.pool_lock as plmod
 import src.storage.models as m
 from app.backend.database.connection import get_db
@@ -132,6 +133,51 @@ def test_top_n_is_bounded(env):
 
 def test_missing_platform_key_is_422(env):
     assert env.client.post("/observing-pools/refresh", json={"dry_run": True}).status_code == 422
+
+
+def test_request_fields_pass_through_to_the_run(env, monkeypatch):
+    """top_n / end_date / provider_name must reach RefreshConfig + refresh_pool — a regression that
+    hardcoded any of them (constant provider, always-today) would otherwise ship green."""
+    captured = {}
+
+    def capturing(session, config, run_analysts, *, end_date, provider_name="yfinance"):
+        captured.update(platform_key=config.platform_key, top_n=config.top_n, end_date=end_date, provider_name=provider_name)
+        return _stub_run()
+
+    monkeypatch.setattr(plmod, "refresh_pool", capturing)
+    env.client.post("/observing-pools/refresh", json={"platform_key": "ai", "top_n": 5, "end_date": "2026-01-02", "provider_name": "fmp", "dry_run": False})
+    assert captured == {"platform_key": "ai", "top_n": 5, "end_date": "2026-01-02", "provider_name": "fmp"}
+
+
+def test_dry_run_failure_is_logged_500_without_leaking_internals(env, monkeypatch):
+    """A refresh_pool crash on the dry-run path must surface as a generic 500 (forensic log only) —
+    never a 200, never a raw exception/SQL string in the response body."""
+    def boom(*a, **k):
+        raise RuntimeError("secret internal detail xyzzy")
+
+    monkeypatch.setattr(op_routes, "refresh_pool", boom)
+    r = env.client.post("/observing-pools/refresh", json={"platform_key": "ai", "dry_run": True})
+    assert r.status_code == 500
+    assert "xyzzy" not in r.text and r.json()["detail"] == "refresh failed for 'ai'"
+
+
+def test_refresh_runs_invalid_status_is_422(env):
+    """A typo'd status filter must 422 (like an unknown platform_key) — not silently return [] as a
+    false 'no runs in that state'."""
+    assert env.client.get("/observing-pools/refresh-runs?status=errored").status_code == 422
+
+
+def test_refresh_runs_filter_applied_before_limit(env):
+    """The limit must bound the MATCHING set, not a pre-truncated newest-window. With 2 older 'ai'
+    runs behind 5 newer 'robotics' runs, ?platform_key=ai&limit=3 returns the 2 ai (a limit-then-filter
+    bug would fetch the 3 newest robotics → 0 ai)."""
+    with env.session_factory() as s:
+        for _ in range(2):
+            s.add(PoolRefreshRun(status=RefreshRunStatus.COMPLETE.value, platform_keys=["ai"]))
+        for _ in range(5):
+            s.add(PoolRefreshRun(status=RefreshRunStatus.COMPLETE.value, platform_keys=["robotics"]))
+    ai = env.client.get("/observing-pools/refresh-runs?platform_key=ai&limit=3").json()
+    assert len(ai) == 2 and all("ai" in run["platform_keys"] for run in ai)
 
 
 # ── GET /observing-pools/refresh-runs ────────────────────────────────────────

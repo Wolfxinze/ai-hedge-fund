@@ -13,11 +13,13 @@ HOT-RELOAD CAVEAT: the in-process scheduler snapshots enabled monitors at build 
 cadence) on the NEXT app restart — not immediately. Manual ``POST /monitors/{id}/run`` is unaffected.
 """
 
+import logging
 import re
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.backend.database.connection import get_db
@@ -27,16 +29,21 @@ from src.observing_pools.platforms import PLATFORM_KEYS
 from src.scheduler.cron_map import resolve_trigger_checked, ScheduleTooFrequentError
 from src.storage.models import Granularity, MonitorConfig
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 # Mirrors observing_pools._TICKER_RE: reject clearly-malformed tickers with 422 rather than storing them.
 _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,16}$")
 _GRANULARITIES = {g.value for g in Granularity}
+# Upper-bound a watchlist so POST /monitors/{id}/run can't be coerced into a synchronous
+# thousands-of-tickers job (each ticker is a multi-minute analyzing-flow call).
+_MAX_TICKERS = 100
 
 
 class MonitorCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    tickers: list[str] = Field(min_length=1)
+    tickers: list[str] = Field(min_length=1, max_length=_MAX_TICKERS)
     granularity: str = Granularity.WEEKLY.value
     platform_keys: list[str] | None = None
     selected_analysts: list[str] | None = None
@@ -47,7 +54,7 @@ class MonitorPatchRequest(BaseModel):
     """All optional — a true partial update. ``model_dump(exclude_unset=True)`` distinguishes an
     omitted field (leave as-is) from an explicit ``null`` (clear a nullable column)."""
 
-    tickers: list[str] | None = None
+    tickers: list[str] | None = Field(default=None, max_length=_MAX_TICKERS)
     granularity: str | None = None
     schedule: str | None = None
     enabled: bool | None = None
@@ -83,6 +90,8 @@ def _monitor_to_dict(monitor: MonitorConfig) -> dict:
 def _validate_tickers(tickers: list[str]) -> list[str]:
     if not tickers:
         raise HTTPException(status_code=422, detail="tickers must be a non-empty list")
+    if len(tickers) > _MAX_TICKERS:
+        raise HTTPException(status_code=422, detail=f"too many tickers ({len(tickers)}); max is {_MAX_TICKERS}")
     for ticker in tickers:
         if not isinstance(ticker, str) or not _TICKER_RE.match(ticker):
             raise HTTPException(status_code=422, detail=f"invalid ticker '{ticker}'")
@@ -120,8 +129,8 @@ def _validate_trade_date(value: str) -> None:
 
 
 @router.get("/monitors")
-def list_monitors(db: Session = Depends(get_db)) -> list[dict]:
-    monitors = db.query(MonitorConfig).order_by(MonitorConfig.id.desc()).all()
+def list_monitors(db: Session = Depends(get_db), limit: int = Query(50, ge=1, le=500)) -> list[dict]:
+    monitors = db.query(MonitorConfig).order_by(MonitorConfig.id.desc()).limit(limit).all()
     return [_monitor_to_dict(monitor) for monitor in monitors]
 
 
@@ -138,7 +147,13 @@ def create_monitor_endpoint(body: MonitorCreateRequest, db: Session = Depends(ge
     monitor = create_monitor(db, name=body.name, tickers=tickers, granularity=body.granularity, platform_keys=body.platform_keys, selected_analysts=body.selected_analysts)
     if body.schedule is not None:
         monitor.schedule = body.schedule  # create_monitor does not set schedule
-    db.commit()  # get_db does not commit; create_monitor only flush()es
+    try:
+        db.commit()  # get_db does not commit; create_monitor only flush()es
+    except IntegrityError:
+        # The pre-check above handles the common case; this closes the concurrent-create race on the
+        # unique name (constraint backstops corruption) — surface the clean 409, not a raw 500.
+        db.rollback()
+        raise HTTPException(status_code=409, detail=f"monitor '{body.name}' already exists; use PATCH to update")
     db.refresh(monitor)
     return _monitor_to_dict(monitor)
 
@@ -151,13 +166,22 @@ def patch_monitor_endpoint(monitor_id: int, body: MonitorPatchRequest, db: Sessi
     if monitor is None:
         raise HTTPException(status_code=404, detail=f"monitor {monitor_id} not found")
     fields = body.model_dump(exclude_unset=True)  # omitted → untouched; explicit null → clear
+    # Explicit null on a NOT-NULL column survives exclude_unset and would otherwise surface as an
+    # opaque IntegrityError 500 — reject it as a 422 at the boundary (tickers/granularity/enabled are
+    # nullable=False; platform_keys/schedule/selected_analysts ARE nullable, so null legitimately clears them).
+    for non_nullable in ("tickers", "granularity", "enabled"):
+        if non_nullable in fields and fields[non_nullable] is None:
+            raise HTTPException(status_code=422, detail=f"{non_nullable} cannot be null")
     if "tickers" in fields:
-        fields["tickers"] = _validate_tickers(fields["tickers"] or [])
-    if "granularity" in fields and fields["granularity"] is not None:
+        fields["tickers"] = _validate_tickers(fields["tickers"])
+    if "granularity" in fields:
         _validate_granularity(fields["granularity"])
     if "platform_keys" in fields:
         _validate_platform_keys(fields["platform_keys"])
-    if "schedule" in fields or "granularity" in fields:
+    # Re-validate the effective schedule against the #18 floor when it could change OR when the monitor
+    # is being (re-)enabled — so a pre-floor sub-floor row (created via direct DB/CLI) can't be re-armed
+    # through the API and then picked up by the scheduler.
+    if "schedule" in fields or "granularity" in fields or fields.get("enabled") is True:
         effective = fields.get("schedule", monitor.schedule) or fields.get("granularity", monitor.granularity)
         _validate_schedule(effective)
     for key, value in fields.items():

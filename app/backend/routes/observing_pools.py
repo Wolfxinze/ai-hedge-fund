@@ -4,6 +4,7 @@ Loopback-bound (research-only). Every report is projected through
 ``serialize_report`` so the disclaimer invariant holds on the API surface too.
 """
 
+import logging
 import re
 import uuid
 from collections.abc import Callable
@@ -29,10 +30,15 @@ from src.storage.models import (
     ObservationPoolEntry,
     OpportunityReport,
     PoolRefreshRun,
+    RefreshRunStatus,
     SerenityResearchRecord,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+_REFRESH_RUN_STATUSES = {s.value for s in RefreshRunStatus}
 
 # Default candidate universe for an API-triggered refresh — mirrors the CLI + scheduler defaults
 # (src/observing_pools/cli.py, src/scheduler/jobs.py). Not client-settable in v1 (loopback tool).
@@ -138,16 +144,22 @@ def refresh_observing_pool(
 
     if body.dry_run:
         # Dry-run mutates nothing (no pool_locks row) — run UNLOCKED, exactly like the CLI.
-        with session_factory() as s:
-            run = refresh_pool(s, config, run_analysts, end_date=end_date, provider_name=body.provider_name)
-            return {"id": None, "status": run.status, "platform_key": body.platform_key, "dry_run": True, "summary": run.summary, "error": run.error}
+        try:
+            with session_factory() as s:
+                run = refresh_pool(s, config, run_analysts, end_date=end_date, provider_name=body.provider_name)
+                return {"id": None, "status": run.status, "platform_key": body.platform_key, "dry_run": True, "summary": run.summary, "error": run.error}
+        except Exception:
+            # Fail loud WITH context (no forensic trail otherwise — dry-run persists no run row), and
+            # surface a generic 500 rather than leaking a raw exception/SQL string to the client.
+            logger.exception("dry-run refresh failed platform=%s", body.platform_key)
+            raise HTTPException(status_code=500, detail=f"refresh failed for '{body.platform_key}'")
 
     try:
         outcome = refresh_pool_locked(
             config,
             run_analysts,
             end_date=end_date,
-            run_id=f"api-{body.platform_key}-{uuid.uuid4().hex[:12]}",
+            run_id=f"api-{body.platform_key}-{uuid.uuid4().hex}",
             session_factory=session_factory,
             provider_name=body.provider_name,
         )
@@ -155,6 +167,9 @@ def refresh_observing_pool(
         raise HTTPException(status_code=409, detail=str(exc))
     except PoolLockDatabaseLockedError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except Exception:
+        logger.exception("refresh failed platform=%s", body.platform_key)
+        raise HTTPException(status_code=500, detail=f"refresh failed for '{body.platform_key}'")
     return {"id": outcome.db_run_id, "status": outcome.status, "platform_key": body.platform_key, "dry_run": False, "summary": outcome.summary, "error": outcome.error}
 
 
@@ -165,15 +180,22 @@ def list_refresh_runs(
     platform_key: str | None = Query(None),
     status: str | None = Query(None),
 ) -> list[dict]:
-    """Refresh-run provenance, newest first. ``platform_key`` filters on the JSON list column in
-    Python (SQLite JSON predicates are fragile and the row count is tiny)."""
+    """Refresh-run provenance, newest first. Filters are applied BEFORE the limit so ``limit`` bounds
+    the MATCHING set (not a pre-truncated window that newer non-matching rows could exhaust). The
+    ``platform_key`` JSON-list filter runs in Python (SQLite JSON predicates are fragile); the run
+    table is low-cardinality (weekly refresh × platforms), so the unbounded read is cheap and the
+    response stays bounded by ``limit``."""
     if platform_key is not None and platform_key not in PLATFORM_KEYS:
         raise HTTPException(status_code=404, detail=f"unknown platform '{platform_key}'")
-    runs = db.query(PoolRefreshRun).order_by(PoolRefreshRun.id.desc()).limit(limit).all()
+    if status is not None and status not in _REFRESH_RUN_STATUSES:
+        # Validate like platform_key (a typo must not masquerade as "no runs in that state").
+        raise HTTPException(status_code=422, detail=f"unknown status '{status}' (expected one of {sorted(_REFRESH_RUN_STATUSES)})")
+    query = db.query(PoolRefreshRun).order_by(PoolRefreshRun.id.desc())
     if status is not None:
-        runs = [r for r in runs if r.status == status]
+        query = query.filter(PoolRefreshRun.status == status)
+    runs = query.all() if platform_key is not None else query.limit(limit).all()
     if platform_key is not None:
-        runs = [r for r in runs if platform_key in (r.platform_keys or [])]
+        runs = [r for r in runs if platform_key in (r.platform_keys or [])][:limit]
     return [_run_to_dict(r) for r in runs]
 
 

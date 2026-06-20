@@ -87,3 +87,12 @@ def test_resolve_trigger_unchanged_does_not_enforce_floor():
     """The tolerant resolve_trigger (used by the scheduler's skip-and-warn reload) must NOT reject a
     sub-floor cron — otherwise a stored too-frequent monitor would crash the build path differently."""
     assert isinstance(resolve_trigger("* * * * *"), CronTrigger)
+
+
+def test_unsatisfiable_cron_returns_inf_and_is_admitted():
+    """A cron firing at most once in the window (here an impossible date — Feb 31) yields inf and is
+    ADMITTED: firing rarely is never a rate-limit concern. Documents the intended #18 semantics so a
+    regression in the <2-fires branch would be caught."""
+    trigger = CronTrigger.from_crontab("0 0 31 2 *", timezone="UTC")
+    assert min_fire_interval_seconds(trigger) == float("inf")
+    assert isinstance(resolve_trigger_checked("0 0 31 2 *"), CronTrigger)  # inf >= floor → passes

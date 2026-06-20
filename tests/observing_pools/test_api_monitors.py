@@ -14,6 +14,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session as SASession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -23,7 +25,8 @@ from app.backend.routes.monitors import get_analyzing_flow
 from app.backend.routes.monitors import router as monitors_router
 from app.backend.routes.observing_pools import router as pools_router
 from src.integrations.tradingagents_adapter import AnalyzingFlowResult
-from src.storage.models import MonitorConfig, ReportLabel
+from src.monitoring.serialize import DisclaimerError
+from src.storage.models import MonitorConfig, OpportunityReport, ReportLabel
 
 _DESCRIPTIVE = {label.value for label in ReportLabel}
 
@@ -194,3 +197,102 @@ def test_get_opportunity_report_by_id(env):
     got = env.client.get(f"/opportunity-reports/{report_id}")
     assert got.status_code == 200 and got.json()["id"] == report_id and got.json()["disclaimer"].strip()
     assert env.client.get("/opportunity-reports/999999").status_code == 404
+
+
+def test_get_report_without_disclaimer_is_refused(env):
+    """The serialize_report chokepoint must REFUSE a disclaimer-less report at the GET-by-id route too
+    (§9.9) — fail loud, not a blanked 200. Guards against someone weakening serialize_report."""
+    with contextlib.closing(env.SessionLocal()) as s:
+        s.add(OpportunityReport(ticker="NVDA", label="mixed", disclaimer="", disclaimer_version=""))
+        s.commit()
+        rid = s.query(OpportunityReport).one().id
+    with pytest.raises(DisclaimerError):
+        env.client.get(f"/opportunity-reports/{rid}")
+
+
+# ── review-fold regression tests (security + silent-failure findings) ─────────
+
+
+def test_patch_null_on_not_null_fields_is_422(env):
+    """Explicit null on a NOT-NULL column (granularity/enabled) must be a 422 at the boundary, not an
+    opaque IntegrityError 500 (silent-failure F1)."""
+    mid = env.client.post("/monitors", json={"name": "nn", "tickers": ["NVDA"], "granularity": "weekly"}).json()["id"]
+    assert env.client.patch(f"/monitors/{mid}", json={"granularity": None}).status_code == 422
+    assert env.client.patch(f"/monitors/{mid}", json={"enabled": None}).status_code == 422
+    assert env.client.patch(f"/monitors/{mid}", json={"tickers": None}).status_code == 422
+
+
+def test_create_too_many_tickers_is_422(env):
+    assert env.client.post("/monitors", json={"name": "big", "tickers": [f"T{i}" for i in range(101)]}).status_code == 422
+
+
+def test_patch_too_many_tickers_is_422(env):
+    mid = env.client.post("/monitors", json={"name": "growable", "tickers": ["NVDA"]}).json()["id"]
+    assert env.client.patch(f"/monitors/{mid}", json={"tickers": [f"T{i}" for i in range(101)]}).status_code == 422
+
+
+def test_list_monitors_limit_is_bounded(env):
+    env.client.post("/monitors", json={"name": "one", "tickers": ["NVDA"]})
+    assert len(env.client.get("/monitors?limit=1").json()) == 1
+    assert env.client.get("/monitors?limit=0").status_code == 422
+    assert env.client.get("/monitors?limit=501").status_code == 422
+
+
+def test_reenable_subfloor_monitor_is_422(env):
+    """A sub-floor schedule stored out-of-band (direct DB / CLI, before the #18 floor) must not be
+    re-armed via PATCH {enabled: true} — the API re-validates the effective schedule on enable (sec F4)."""
+    with contextlib.closing(env.SessionLocal()) as s:
+        s.add(MonitorConfig(name="legacy", tickers=["NVDA"], granularity="weekly", schedule="*/5 * * * *", enabled=False))
+        s.commit()
+        mid = s.query(MonitorConfig).filter_by(name="legacy").one().id
+    assert env.client.patch(f"/monitors/{mid}", json={"enabled": True}).status_code == 422
+
+
+def test_patch_name_is_ignored(env):
+    """Name is immutable on PATCH (no `name` field) — a name in the body is silently dropped, never
+    honored (locks the documented invariant against the unique-collision path reopening)."""
+    mid = env.client.post("/monitors", json={"name": "original", "tickers": ["NVDA"]}).json()["id"]
+    assert env.client.patch(f"/monitors/{mid}", json={"name": "renamed", "enabled": False}).json()["name"] == "original"
+
+
+def test_create_invalid_granularity_message_precedes_schedule(env):
+    """An unknown granularity 422s on GRANULARITY grounds (validation order), not a confusing 'invalid
+    schedule' message — locks the _validate_granularity-before-_validate_schedule order."""
+    r = env.client.post("/monitors", json={"name": "g", "tickers": ["NVDA"], "granularity": "yearly"})
+    assert r.status_code == 422 and "granularity" in str(r.json()["detail"])
+
+
+def test_run_all_tickers_degraded_still_commits(env):
+    """Even a 100%-degraded run persists every degraded report (durable provenance) and returns 200
+    with degraded_count == len(tickers) — degrade is surfaced, never a silent skip."""
+    env.set_flow(lambda ticker, trade_date: (_ for _ in ()).throw(RuntimeError("all fail")))
+    mid = env.client.post("/monitors", json={"name": "alldead", "tickers": ["NVDA", "MSFT"]}).json()["id"]
+    body = env.client.post(f"/monitors/{mid}/run").json()
+    assert body["degraded_count"] == 2 and body["any_degraded"] is True
+    assert len(env.client.get("/opportunity-reports").json()) == 2  # committed + readable in a fresh request
+
+
+def test_create_commit_integrityerror_maps_to_409():
+    """The concurrent-create unique-name race (pre-check passes, commit fails) maps to a clean 409 +
+    rollback, not a raw 500 (silent-failure F2 / code-review LOW-1)."""
+
+    class _BoomCommit(SASession):
+        def commit(self):
+            raise IntegrityError("INSERT INTO monitor_configs", {}, Exception("UNIQUE constraint failed: monitor_configs.name"))
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    m.Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, class_=_BoomCommit)
+
+    def override_get_db():
+        s = Session()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app = FastAPI()
+    app.include_router(monitors_router)
+    app.dependency_overrides[get_db] = override_get_db
+    client = TestClient(app)
+    assert client.post("/monitors", json={"name": "racy", "tickers": ["NVDA"]}).status_code == 409
