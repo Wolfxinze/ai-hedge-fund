@@ -52,11 +52,13 @@ class SerenityResearchRecord(Base):
 
     __tablename__ = "serenity_research_records"
     # Defense in depth (PRD §12/§20): NOT NULL admits an empty-string disclaimer;
-    # this CHECK rejects blank/whitespace-only at the DB layer for any path that
-    # bypasses serialization (the serenity GET projection currently does — flagged
-    # for a follow-up serialize_serenity chokepoint).
+    # this CHECK rejects blank/whitespace-only at the DB layer. It matters most
+    # here because the GET /serenity/research projection bypasses serialize_report
+    # (a serialize_serenity chokepoint is a deferred follow-up), so the CHECK is
+    # this path's only guard — hence the explicit space+tab+newline+CR trim set
+    # (bare SQLite trim() strips only ASCII space).
     __table_args__ = (
-        CheckConstraint("length(trim(disclaimer)) > 0 AND length(trim(disclaimer_version)) > 0", name="ck_serenity_research_records_disclaimer_nonempty"),
+        CheckConstraint("length(trim(disclaimer, ' ' || char(9) || char(10) || char(13))) > 0 AND length(trim(disclaimer_version, ' ' || char(9) || char(10) || char(13))) > 0", name="ck_serenity_research_records_disclaimer_nonempty"),
     )
 
     id = Column(Integer, primary_key=True, index=True)

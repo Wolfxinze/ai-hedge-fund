@@ -26,7 +26,11 @@ depends_on: Union[str, Sequence[str], None] = None
 
 _OPP = "ck_opportunity_reports_disclaimer_nonempty"
 _SER = "ck_serenity_research_records_disclaimer_nonempty"
-_COND = "length(trim(disclaimer)) > 0 AND length(trim(disclaimer_version)) > 0"
+# Trim char-set = space + tab + newline + CR (bare SQLite trim() strips only ASCII
+# space, so a tab/newline-only disclaimer would otherwise pass). Identical to the
+# model __table_args__ so create_all and the migration agree.
+_WS = "' ' || char(9) || char(10) || char(13)"
+_COND = f"length(trim(disclaimer, {_WS})) > 0 AND length(trim(disclaimer_version, {_WS})) > 0"
 
 
 def upgrade() -> None:

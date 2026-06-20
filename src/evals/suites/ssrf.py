@@ -62,13 +62,20 @@ def _off_allowlist_unverified(rec: Recorder) -> bool:
             rec.record("source_type_for_host", host=host, leaked=True)
             return False
     if source_type_for_host("www.sec.gov") == SourceType.UNVERIFIED:  # control: a real host is allowlisted
+        rec.record("source_type_for_host", host="www.sec.gov", control_failed=True)
         return False
     rec.record("source_type_for_host", off_allowlist_blocked=4)
     return True
 
 
+class _NetTripwire(BaseException):
+    """Subclasses BaseException so it cannot be swallowed by fetch_excerpt's blanket
+    ``except Exception`` (which would mask a network-reach regression as
+    'internal_error'). A true loud tripwire for the offline guarantee."""
+
+
 def _raise_resolver(*_a, **_k):
-    raise AssertionError("getaddrinfo must not be called (pre-DNS reject expected)")
+    raise _NetTripwire("getaddrinfo must not be called (pre-DNS reject expected)")
 
 
 def _resolver_to(*ips):
@@ -81,7 +88,7 @@ def _resolver_to(*ips):
 @contextmanager
 def _net(resolver):
     def _no_http(self, *_a, **_k):
-        raise AssertionError("no real HTTP allowed in evals")
+        raise _NetTripwire("no real HTTP allowed in evals")
 
     with mock.patch.object(socket, "getaddrinfo", resolver), mock.patch.object(requests.Session, "send", _no_http):
         yield

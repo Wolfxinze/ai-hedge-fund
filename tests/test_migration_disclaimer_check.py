@@ -54,10 +54,15 @@ def test_disclaimer_check_applies_enforces_and_roundtrips():
 
         command.upgrade(cfg, "head")
 
-        # The product indexes survive the batch table-recreate.
+        # All product indexes AND the FK survive the batch table-recreate (a
+        # batch-mode regression that drops an index/FK is the classic failure).
         insp = inspect(create_engine(url))
         opp_idx = {ix["name"] for ix in insp.get_indexes("opportunity_reports")}
-        assert "ix_opportunity_reports_ticker" in opp_idx
+        ser_idx = {ix["name"] for ix in insp.get_indexes("serenity_research_records")}
+        assert {"ix_opportunity_reports_id", "ix_opportunity_reports_monitor_id", "ix_opportunity_reports_ticker"} <= opp_idx
+        assert {"ix_serenity_research_records_id", "ix_serenity_research_records_platform_key", "ix_serenity_research_records_ticker"} <= ser_idx
+        opp_fks = insp.get_foreign_keys("opportunity_reports")
+        assert any(fk["referred_table"] == "monitor_configs" and fk["constrained_columns"] == ["monitor_id"] for fk in opp_fks), "monitor_id FK dropped by batch recreate"
 
         # After upgrade the CHECK is enforced: a blank disclaimer is rejected.
         for model in ("opportunity", "serenity"):

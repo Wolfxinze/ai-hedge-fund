@@ -32,11 +32,14 @@ def run_case(case: EvalCase) -> tuple[EvalResult, Transcript]:
         except Exception as exc:  # a raising grader is a FAIL, never a silent pass (Rule 12)
             ok = False
             reasons.append(f"trial {i} raised {type(exc).__name__}: {exc}")
-        if not ok and not reasons:
-            reasons.append(f"trial {i} returned False")
+        else:
+            if not ok:
+                reasons.append(f"trial {i} returned False")
         trials.append(bool(ok))
 
-    reason = "; ".join(reasons)
+    # Each non-passing trial contributes its reason; dedup so a deterministic grader
+    # failing identically across k trials yields one line, not k copies.
+    reason = "; ".join(dict.fromkeys(reasons))
     result = EvalResult(case_id=case.case_id, suite=case.suite, kind=case.kind, target=case.target, trials=trials, reason=reason)
     transcript = Transcript(
         case_id=case.case_id,
@@ -77,8 +80,11 @@ class SuiteReport:
     def all_passed(self) -> bool:
         return not self.failures
 
-    def pass_rate_for(self, target: str) -> float:
-        return pass_rate([r.passed for r in self.results if r.target == target])
+    def pass_rate_for(self, target: str) -> float | None:
+        """Pass-rate over cases of ``target``; None when there are none (so an
+        all-regression run reports capability as null, not a misleading 0.0)."""
+        flags = [r.passed for r in self.results if r.target == target]
+        return pass_rate(flags) if flags else None
 
     def summary(self) -> dict:
         """Bare-dict summary (matches the observing_pools route style, not the envelope)."""

@@ -75,10 +75,11 @@ def test_export_filters_by_ticker(db, capsys):
 
 
 def test_export_refuses_whitespace_only_disclaimer(db, capsys):
-    """A '\\t\\n  ' disclaimer PASSES the SQLite CHECK's trim() (which strips only
-    spaces) but FAILS serialize_report's .strip() — proving export routes through
-    the chokepoint AND that the DB-CHECK + serialize layers compose."""
-    _seed(db, "NVDA", "\t\n  ", "2026-06")  # admitted by the DB CHECK
+    """A non-breaking-space disclaimer PASSES the DB CHECK (whose SQLite trim set is
+    ASCII space/tab/newline/CR — \\xa0 is none of those) but FAILS serialize_report's
+    Unicode-aware .strip() — proving export routes through the chokepoint AND that the
+    DB-CHECK + serialize layers compose to close the residual exotic-whitespace gap."""
+    _seed(db, "NVDA", "\xa0", "2026-06")  # admitted by the DB CHECK, rejected by .strip()
     rc = cli.main(["export"])
     assert rc == 2
     assert "refusing to export" in capsys.readouterr().err

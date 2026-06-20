@@ -71,6 +71,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cases = build_suite(args.suite) if args.suite else build_all()
+    if not cases:  # zero cases is a wiring failure, not a clean pass — fail loud (Rule 12)
+        print(f"no eval cases to run (suite={args.suite!r}); registered suites: {registered_suites()}", file=sys.stderr)
+        return 2
+
     report: SuiteReport = run_suite(cases)
     write_transcripts(report.transcripts, args.out)
 

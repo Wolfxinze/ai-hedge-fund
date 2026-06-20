@@ -65,9 +65,11 @@ class OpportunityReport(Base):
     # Defense in depth (PRD §12/§20 "DB CHECK"): the serializer refuses a blank
     # disclaimer at .strip(), but NOT NULL alone admits an empty string. This
     # CHECK closes that hole at the DB layer for any direct write that bypasses
-    # serialize_report. (SQLite trim() handles the empty/spaces-only case.)
+    # serialize_report. The trim char-set is space + tab + newline + CR, because
+    # bare SQLite trim() strips only ASCII space (a tab/newline-only disclaimer
+    # would otherwise pass); residual exotic-whitespace is still caught by .strip().
     __table_args__ = (
-        CheckConstraint("length(trim(disclaimer)) > 0 AND length(trim(disclaimer_version)) > 0", name="ck_opportunity_reports_disclaimer_nonempty"),
+        CheckConstraint("length(trim(disclaimer, ' ' || char(9) || char(10) || char(13))) > 0 AND length(trim(disclaimer_version, ' ' || char(9) || char(10) || char(13))) > 0", name="ck_opportunity_reports_disclaimer_nonempty"),
     )
 
     id = Column(Integer, primary_key=True, index=True)

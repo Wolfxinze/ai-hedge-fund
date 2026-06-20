@@ -157,12 +157,17 @@ def test_run_suite_aggregates_and_summarizes():
 
 # ── reporting: JSONL transcript + counsel sign-off ───────────────────────────
 def test_write_transcripts_jsonl_roundtrip(tmp_path):
-    _, transcript = run_case(_case(CodeGrader("g", lambda _r: True)))
+    _, transcript = run_case(_case(CodeGrader("g", lambda rec: rec.record("seam", v=7) or True)))
     out = write_transcripts([transcript], tmp_path / "t.jsonl")
     lines = out.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     row = json.loads(lines[0])
+    # Full structural fidelity — a serialization bug dropping tool_calls/trials/kind
+    # must fail, not just case_id/passed.
     assert row["case_id"] == "c1" and row["passed"] is True
+    assert row["kind"] == "code" and row["trials"] == [True]
+    assert row["tool_calls"] == [{"seam": "seam", "v": 7}]
+    assert row == transcript.to_dict()
 
 
 def test_write_transcripts_appends(tmp_path):
@@ -180,3 +185,40 @@ def test_signoff_recording(tmp_path):
     assert signoff_recorded(p) is False  # a not-approved line does not count
     record_signoff(p, reviewer="counsel", notes="approved for internal use", approved=True)
     assert signoff_recorded(p) is True
+
+
+# ── model grader through the runner (not just direct __call__) ───────────────
+def test_model_grader_can_fail_through_runner():
+    true_case = EvalCase("m", "s", ModelGrader("m.t", lambda rec, judge: judge("q?"), judge=lambda _q: True))
+    false_case = EvalCase("m", "s", ModelGrader("m.f", lambda rec, judge: judge("q?"), judge=lambda _q: False))
+    assert run_case(true_case)[0].passed is True
+    assert run_case(false_case)[0].passed is False  # the injected judge genuinely fails the gate
+
+
+# ── the eval CLI itself (exit codes, transcript write, --suite, empty guard) ──
+def test_evals_cli_writes_transcripts_and_passes(tmp_path, capsys):
+    from src.evals.reporting import main
+
+    out = tmp_path / "ssrf.jsonl"
+    rc = main(["--suite", "ssrf", "--out", str(out)])
+    assert rc == 0
+    assert "OK:" in capsys.readouterr().out
+    assert len(out.read_text(encoding="utf-8").splitlines()) == 4  # ssrf has 4 cases
+
+
+def test_evals_cli_fails_loud_on_failure(tmp_path, capsys, monkeypatch):
+    import src.evals.reporting as rep
+
+    monkeypatch.setattr(rep, "build_all", lambda: [EvalCase("boom", "s", CodeGrader("g", lambda _r: False))])
+    rc = rep.main(["--out", str(tmp_path / "f.jsonl")])
+    assert rc == 2
+    assert "FAILED" in capsys.readouterr().err
+
+
+def test_evals_cli_empty_suite_is_loud(capsys, monkeypatch):
+    import src.evals.reporting as rep
+
+    monkeypatch.setattr(rep, "build_all", lambda: [])  # a wiring failure must not read as a clean pass
+    rc = rep.main([])
+    assert rc == 2
+    assert "no eval cases" in capsys.readouterr().err

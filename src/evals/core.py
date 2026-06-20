@@ -26,6 +26,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
+from src.evals.metrics import pass_at_k as _pass_at_k
+from src.evals.metrics import pass_hat_k as _pass_hat_k
+
 # Anthropic targets: regression suites are quality gates (~99-100%); capability
 # suites are stretch goals (~70%). Stored on the case so the runner/report can
 # decide gate-vs-informational without hard-coding per suite.
@@ -151,11 +154,11 @@ class EvalResult:
 
     @property
     def pass_at_k(self) -> bool:
-        return any(self.trials)
+        return _pass_at_k(self.trials)
 
     @property
     def pass_hat_k(self) -> bool:
-        return bool(self.trials) and all(self.trials)
+        return _pass_hat_k(self.trials)
 
     @property
     def passed(self) -> bool:

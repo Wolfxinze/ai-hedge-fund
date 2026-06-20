@@ -55,3 +55,45 @@ def test_scoring_grader_catches_degraded_masking(monkeypatch):
     assert result.passed is False
     # sanity: the real composite is untouched outside the patch
     assert real_scoring.composite is not None
+
+
+def test_evidence_grader_catches_substantiation_leak(monkeypatch):
+    import src.evals.suites.evidence as ev
+
+    # Regression: is_substantiated returns True for everything -> the 200-irrelevant
+    # corpus would (wrongly) all substantiate.
+    monkeypatch.setattr(ev, "is_substantiated", lambda claim, excerpt: True)
+    result, _ = run_case(_case("evidence", "irrelevant_200_not_substantiated"))
+    assert result.passed is False
+
+
+def test_injection_grader_catches_payload_leak(monkeypatch):
+    import src.evals.suites.injection as inj
+    from src.storage.models import SourceType
+
+    # Regression: classify_reference is tricked into marking everything FILING +
+    # substantiated (as if the injected text set the fields) -> grader must catch it.
+    monkeypatch.setattr(inj, "classify_reference", lambda **kw: {"source_host": "x", "source_type": SourceType.FILING, "substantiated": True, "reason": "ok"})
+    result, _ = run_case(_case("injection", "payload_cannot_flip_source_type_or_substantiation"))
+    assert result.passed is False
+
+
+def test_classification_grader_catches_substring_leak(monkeypatch):
+    import src.evals.suites.classification as cl
+
+    # Regression: the classifier fires 'ai' on every input -> the substring trap
+    # ('ai' in 'Internet Retail') is no longer blocked.
+    monkeypatch.setattr(cl, "classify_candidate", lambda **kw: {"ai": None})
+    result, _ = run_case(_case("classification", "substring_false_positives_blocked"))
+    assert result.passed is False
+
+
+def test_no_trade_grader_catches_planted_forbidden_import(monkeypatch):
+    import src.evals.suites.no_trade as nt
+
+    # Regression: a forbidden substring that DOES occur in the scanned modules'
+    # real imports (scoring_graph imports src.utils.analysts) -> the AST scan must
+    # flip to FAIL, proving it actually inspects imports (not a vacuous pass).
+    monkeypatch.setattr(nt, "_FORBIDDEN_IMPORT_SUBSTRINGS", ("analysts",))
+    result, _ = run_case(_case("no_trade", "modules_have_no_direct_trade_imports"))
+    assert result.passed is False
