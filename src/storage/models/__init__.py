@@ -7,11 +7,18 @@ write to non-existent tables. New model modules must be imported here.
 """
 
 from src.storage.database import Base
+from src.storage.models.monitoring import (
+    Granularity,
+    MonitorConfig,
+    OpportunityReport,
+    ReportLabel,
+)
 from src.storage.models.observing_pools import (
     CandidateSecurity,
     InnovationPlatform,
     ObservationPoolEntry,
     PoolEntryStatus,
+    PoolLock,
     PoolRefreshRun,
     RefreshRunStatus,
 )
@@ -22,12 +29,6 @@ from src.storage.models.serenity import (
     SerenityResearchRecord,
     SourceType,
 )
-from src.storage.models.monitoring import (
-    Granularity,
-    MonitorConfig,
-    OpportunityReport,
-    ReportLabel,
-)
 
 __all__ = [
     "Base",
@@ -35,6 +36,7 @@ __all__ = [
     "InnovationPlatform",
     "ObservationPoolEntry",
     "PoolEntryStatus",
+    "PoolLock",
     "PoolRefreshRun",
     "RefreshRunStatus",
     "EvidenceGrade",

@@ -1,15 +1,16 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import logging
-import asyncio
 
-from app.backend.routes import api_router
-from app.backend.database.connection import engine
-from app.backend.database.models import Base
 # Register observing-pool tables on the shared Base so create_all discovers them
 # (PRD v4 §8.1 model-discovery). Import is for its registration side-effect.
 import src.storage.models  # noqa: F401
+from app.backend.database.connection import engine
+from app.backend.database.models import Base
+from app.backend.routes import api_router
 from app.backend.services.ollama_service import ollama_service
+from src.scheduler.scheduler import build_scheduler, start_scheduler, stop_scheduler
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,6 +21,9 @@ app = FastAPI(title="AI Hedge Fund API", description="Backend API for AI Hedge F
 # Dev convenience: create any missing tables. Alembic migrations are the canonical
 # schema source (run `alembic upgrade head`); create_all coexists idempotently.
 Base.metadata.create_all(bind=engine)
+
+# Phase 8 in-process scheduler handle (set on startup, stopped on shutdown).
+_scheduler = None
 
 # Configure CORS
 app.add_middleware(
@@ -57,3 +61,24 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"Could not check Ollama status: {e}")
         logger.info("ℹ Ollama integration is available if you install it later")
+
+    # Phase 8: start the in-process observing-pools scheduler. A misconfigured
+    # OBSERVING_POOL_REFRESH_CRON raises here — caught + logged so the API still starts (just
+    # without the scheduler), rather than failing the whole boot.
+    global _scheduler
+    try:
+        _scheduler = build_scheduler()
+        start_scheduler(_scheduler)
+    except Exception:
+        logger.exception("APScheduler failed to start; API continuing without it")
+        _scheduler = None
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop the scheduler on shutdown (wait=False — don't block ASGI teardown on an in-flight
+    refresh; the PoolLock finally-release + TTL cover lock cleanup)."""
+    global _scheduler
+    if _scheduler is not None:
+        stop_scheduler(_scheduler)
+        _scheduler = None

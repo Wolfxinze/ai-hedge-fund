@@ -1,8 +1,8 @@
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-import os
-from pathlib import Path
 
 # Get the backend directory path
 BACKEND_DIR = Path(__file__).parent.parent
@@ -14,7 +14,11 @@ DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
 # Create SQLAlchemy engine
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False}  # Needed for SQLite
+    # check_same_thread=False: the Phase-8 in-process APScheduler runs jobs in worker
+    # threads that share this engine. timeout=30: SQLite busy-wait (seconds) so concurrent
+    # writers (scheduler thread + a CLI/API refresh) serialize instead of immediately raising
+    # "database is locked" — the bounded retry the PoolLock claim protocol relies on (PRD §10).
+    connect_args={"check_same_thread": False, "timeout": 30},
 )
 
 # Create SessionLocal class
