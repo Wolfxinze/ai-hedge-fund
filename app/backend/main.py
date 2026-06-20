@@ -69,8 +69,8 @@ async def startup_event():
     try:
         _scheduler = build_scheduler()
         start_scheduler(_scheduler)
-    except Exception as exc:
-        logger.error("APScheduler failed to start (continuing without it): %s", exc)
+    except Exception:
+        logger.exception("APScheduler failed to start; API continuing without it")
         _scheduler = None
 
 

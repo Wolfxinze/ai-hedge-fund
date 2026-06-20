@@ -184,3 +184,75 @@ def test_refresh_pool_locked_second_caller_contended(factory, monkeypatch):
         acquire_pool_lock(s, "ai", "other", clock=pl._utc_now, ttl_seconds=3600)
     with pytest.raises(PoolLockContendedError):
         refresh_pool_locked(cfg, lambda *a, **k: ({}, {}), end_date="2026-01-01", run_id="A", session_factory=factory)
+
+
+# ── real concurrency + error-typing ──────────────────────────────────────────
+
+
+def test_non_lock_operational_error_reraises(factory, monkeypatch):
+    """A non-'database is locked' OperationalError must propagate AS-IS, never be masked as a lock
+    error — else a real DB fault (e.g. missing table) would look like a benign 'contended' skip."""
+    with factory() as s:
+        def boom(*a, **k):
+            raise OperationalError("SELECT ...", {}, Exception("no such table: pool_locks"))
+
+        monkeypatch.setattr(s, "execute", boom)
+        with pytest.raises(OperationalError):  # NOT PoolLockDatabaseLockedError
+            acquire_pool_lock(s, "ai", "A", clock=_at(_T0))
+
+
+def test_claim_race_exactly_one_winner(tmp_path):
+    """Two threads race to steal the SAME expired lock on a real FILE-backed SQLite (two real
+    connections + busy_timeout). The atomic steal-if-expired UPDATE must yield EXACTLY one winner
+    — this is the only test that would catch a SELECT→UPDATE TOCTOU regression (which a
+    single-threaded test cannot)."""
+    import threading
+
+    db = tmp_path / "lock_race.db"
+    engine = create_engine(f"sqlite:///{db}", connect_args={"check_same_thread": False, "timeout": 30})
+    m.Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    @contextlib.contextmanager
+    def factory():
+        s = Session()
+        try:
+            yield s
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            s.close()
+
+    with factory() as s:  # seed an expired lock
+        acquire_pool_lock(s, "ai", "A", clock=_at(_T0), ttl_seconds=10)  # expires T0+10
+
+    now = _at(_T0 + timedelta(seconds=100))  # well past expiry
+    barrier = threading.Barrier(2)
+    results: list = []
+    rlock = threading.Lock()
+
+    def contend(run_id):
+        barrier.wait()  # maximise the overlap
+        try:
+            with factory() as s:
+                fence = acquire_pool_lock(s, "ai", run_id, clock=now, ttl_seconds=10)
+            with rlock:
+                results.append(("won", run_id, fence))
+        except (PoolLockContendedError, PoolLockDatabaseLockedError) as exc:
+            with rlock:
+                results.append(("lost", run_id, type(exc).__name__))
+
+    threads = [threading.Thread(target=contend, args=(rid,)) for rid in ("B", "C")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    won = [r for r in results if r[0] == "won"]
+    assert len(won) == 1  # EXACTLY one winner — the atomicity invariant
+    with factory() as s:
+        held = s.get(PoolLock, "ai")
+        assert held.locked_by == won[0][1] and held.fence == 2  # the sole winner owns the bumped fence
+    engine.dispose()

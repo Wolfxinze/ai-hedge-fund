@@ -74,7 +74,7 @@ def test_refresh_all_platforms_locks_each_and_releases(factory, monkeypatch):
         assert s.query(PoolLock).count() == 0  # all locks released after the job
 
 
-def test_refresh_skips_already_locked_platform(factory, monkeypatch):
+def test_refresh_skips_already_locked_platform(factory, monkeypatch, caplog):
     locked = PLATFORM_KEYS[0]
     with factory() as s:
         pl.acquire_pool_lock(s, locked, "other-runner", clock=pl._utc_now, ttl_seconds=3600)  # live lock
@@ -86,11 +86,13 @@ def test_refresh_skips_already_locked_platform(factory, monkeypatch):
         return _stub_run()
 
     monkeypatch.setattr(pl, "refresh_pool", stub_refresh)
-    refresh_all_platforms_job(
-        run_analysts_factory=lambda: (lambda *a, **k: ({}, {})), session_factory=factory, end_date_fn=lambda: "2026-01-05"
-    )
+    with caplog.at_level("WARNING", logger="src.scheduler.jobs"):
+        refresh_all_platforms_job(
+            run_analysts_factory=lambda: (lambda *a, **k: ({}, {})), session_factory=factory, end_date_fn=lambda: "2026-01-05"
+        )
     assert locked not in seen  # the live-locked platform was skipped (contended)
     assert len(seen) == len(PLATFORM_KEYS) - 1
+    assert any("skipped" in r.getMessage() and locked in r.getMessage() for r in caplog.records)  # skip is loud
     with factory() as s:
         assert s.get(PoolLock, locked).locked_by == "other-runner"  # other holder's lock untouched
 
@@ -113,8 +115,9 @@ def test_run_monitor_job_emits_disclaimer_reports_and_no_trades(factory):
         reports = s.query(OpportunityReport).filter_by(monitor_id=mid).all()
         assert len(reports) == 2  # one report per ticker
         assert all(r.disclaimer for r in reports)  # serialize_report chokepoint enforced the disclaimer
-        # No-trade boundary: a scheduled monitor never creates a hedge-fund flow/trade run.
+        # No-trade boundary: a scheduled monitor never creates a hedge-fund flow/trade run/cycle.
         assert s.query(app.backend.database.models.HedgeFundFlowRun).count() == 0
+        assert s.query(app.backend.database.models.HedgeFundFlowRunCycle).count() == 0
 
 
 def test_run_monitor_job_skips_disabled(factory):

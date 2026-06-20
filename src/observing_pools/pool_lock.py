@@ -18,8 +18,8 @@ the long refresh strictly outside any lock-holding transaction.
 
 import logging
 import os
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -160,25 +160,14 @@ def refresh_pool_locked(
             outcome = RefreshOutcome(status=run.status, error=run.error, summary=run.summary, fence=fence, db_run_id=run.id)
         return outcome
     finally:
-        with session_factory() as lock_s:
-            release_pool_lock(lock_s, config.platform_key, fence, run_id)
-
-
-@contextmanager
-def pool_lock(
-    platform_key: str,
-    run_id: str,
-    *,
-    session_factory: Callable[[], AbstractContextManager[Session]] = session_scope,
-    clock: Callable[[], datetime] = _utc_now,
-    ttl_seconds: int | None = None,
-) -> Iterator[int]:
-    """Standalone guard for callers that aren't a pool refresh (e.g. a future bulk op): claims the
-    lock, yields the fence, and releases it in a finally. Raises on contention/db-locked."""
-    with session_factory() as lock_s:
-        fence = acquire_pool_lock(lock_s, platform_key, run_id, clock=clock, ttl_seconds=ttl_seconds)
-    try:
-        yield fence
-    finally:
-        with session_factory() as lock_s:
-            release_pool_lock(lock_s, platform_key, fence, run_id)
+        # The release must NEVER mask the body's exception nor leak the lock silently: if the
+        # release DELETE itself fails (e.g. "database is locked"), log loudly and let the TTL
+        # reclaim the lock — do not raise out of the finally (that would replace the real error).
+        try:
+            with session_factory() as lock_s:
+                release_pool_lock(lock_s, config.platform_key, fence, run_id)
+        except Exception:
+            logger.exception(
+                "pool_lock release FAILED platform=%s run=%s fence=%d; lock will auto-expire via TTL",
+                config.platform_key, run_id, fence,
+            )

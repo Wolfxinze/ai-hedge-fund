@@ -84,13 +84,19 @@ def run_monitor_job(
     serialize_report chokepoint. Skips a monitor that was deleted/disabled since registration.
     Never issues a trade. Opens its own session (own transaction)."""
     trade_date = trade_date_fn()
-    with session_factory() as s:
-        monitor = s.get(MonitorConfig, monitor_id)
-        if monitor is None or not monitor.enabled:
-            logger.info("scheduled monitor id=%s missing/disabled; skipping", monitor_id)
-            return
-        kwargs = {"trade_date": trade_date}
-        if analyzing_flow is not None:  # else run_monitor uses its production default flow
-            kwargs["analyzing_flow"] = analyzing_flow
-        result = run_monitor(s, monitor, **kwargs)
-        logger.info("scheduled monitor=%s reports=%d degraded=%d", monitor.name, len(result.reports), result.degraded_count)
+    try:
+        with session_factory() as s:
+            monitor = s.get(MonitorConfig, monitor_id)
+            if monitor is None or not monitor.enabled:
+                logger.info("scheduled monitor id=%s missing/disabled; skipping", monitor_id)
+                return
+            kwargs = {"trade_date": trade_date}
+            if analyzing_flow is not None:  # else run_monitor uses its production default flow
+                kwargs["analyzing_flow"] = analyzing_flow
+            result = run_monitor(s, monitor, **kwargs)
+            logger.info("scheduled monitor=%s reports=%d degraded=%d", monitor.name, len(result.reports), result.degraded_count)
+    except Exception:
+        # Local breadcrumb in our namespace (don't rely solely on APScheduler's executor logger),
+        # then re-raise so the framework also records the job failure — never silently lost.
+        logger.exception("scheduled monitor id=%s crashed", monitor_id)
+        raise

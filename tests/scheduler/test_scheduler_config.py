@@ -79,6 +79,8 @@ def test_enabled_monitor_registers_a_job(factory, monkeypatch):
     sch = build_scheduler(session_factory=factory, run_analysts_factory=_raf)
     ids = {j.id for j in sch.get_jobs()}
     assert REFRESH_JOB_ID in ids and f"monitor_{mid}" in ids
+    mjob = sch.get_job(f"monitor_{mid}")  # monitor jobs are as LLM-heavy as refresh → same no-pileup config
+    assert mjob.max_instances == 1 and mjob.coalesce is True
 
 
 def test_invalid_monitor_schedule_skipped_scheduler_survives(factory, monkeypatch, caplog):
