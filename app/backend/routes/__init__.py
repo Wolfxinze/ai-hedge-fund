@@ -8,6 +8,7 @@ from app.backend.routes.flow_runs import router as flow_runs_router
 from app.backend.routes.ollama import router as ollama_router
 from app.backend.routes.language_models import router as language_models_router
 from app.backend.routes.api_keys import router as api_keys_router
+from app.backend.routes.monitors import router as monitors_router
 from app.backend.routes.observing_pools import router as observing_pools_router
 
 # Main API router
@@ -23,3 +24,4 @@ api_router.include_router(ollama_router, tags=["ollama"])
 api_router.include_router(language_models_router, tags=["language-models"])
 api_router.include_router(api_keys_router, tags=["api-keys"])
 api_router.include_router(observing_pools_router, tags=["observing-pools"])
+api_router.include_router(monitors_router, tags=["monitors"])
