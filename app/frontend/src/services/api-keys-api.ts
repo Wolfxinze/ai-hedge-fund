@@ -1,9 +1,12 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
+// Read-back projection: NEVER carries the raw key (PRD §9.10 X6). is_set drives the
+// "configured" UI; masked_tail shows only the last few characters.
 export interface ApiKey {
   id: number;
   provider: string;
-  key_value: string;
+  is_set: boolean;
+  masked_tail: string;
   is_active: boolean;
   description?: string;
   created_at: string;
@@ -20,6 +23,8 @@ export interface ApiKeySummary {
   updated_at?: string;
   last_used?: string;
   has_key: boolean;
+  is_set: boolean;
+  masked_tail: string;
 }
 
 export interface ApiKeyCreateRequest {

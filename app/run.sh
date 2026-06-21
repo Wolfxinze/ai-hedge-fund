@@ -250,7 +250,7 @@ start_services() {
     print_status "Starting backend server..."
     # Run from the app directory (parent of backend) to ensure proper Python imports
     cd ..
-    poetry run uvicorn app.backend.main:app --reload --host 127.0.0.1 --port 8000 > "$LOG_DIR/backend.log" 2>&1 &
+    poetry run uvicorn app.backend.main:app --reload --host "${SERVER_BIND_HOST:-127.0.0.1}" --port 8000 > "$LOG_DIR/backend.log" 2>&1 &
     BACKEND_PID=$!
     cd app
     

@@ -1,17 +1,19 @@
-from fastapi import APIRouter, HTTPException, Depends
-from sqlalchemy.orm import Session
 from typing import List
 
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
 from app.backend.database import get_db
-from app.backend.repositories.api_key_repository import ApiKeyRepository
 from app.backend.models.schemas import (
+    ApiKeyBulkUpdateRequest,
     ApiKeyCreateRequest,
-    ApiKeyUpdateRequest,
     ApiKeyResponse,
     ApiKeySummaryResponse,
-    ApiKeyBulkUpdateRequest,
-    ErrorResponse
+    ApiKeyUpdateRequest,
+    ErrorResponse,
 )
+from app.backend.repositories.api_key_repository import ApiKeyRepository
+from app.backend.services.api_key_service import ApiKeyService
 
 router = APIRouter(prefix="/api-keys", tags=["api-keys"])
 
@@ -27,14 +29,14 @@ router = APIRouter(prefix="/api-keys", tags=["api-keys"])
 async def create_or_update_api_key(request: ApiKeyCreateRequest, db: Session = Depends(get_db)):
     """Create a new API key or update existing one"""
     try:
-        repo = ApiKeyRepository(db)
-        api_key = repo.create_or_update_api_key(
+        service = ApiKeyService(db)
+        api_key = service.repository.create_or_update_api_key(
             provider=request.provider,
             key_value=request.key_value,
             description=request.description,
             is_active=request.is_active
         )
-        return ApiKeyResponse.from_orm(api_key)
+        return service.to_response(api_key)  # projection only — never returns key_value
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create/update API key: {str(e)}")
 
@@ -47,11 +49,11 @@ async def create_or_update_api_key(request: ApiKeyCreateRequest, db: Session = D
     },
 )
 async def get_api_keys(include_inactive: bool = False, db: Session = Depends(get_db)):
-    """Get all API keys (without actual key values for security)"""
+    """Get all API keys (with is_set + masked_tail, never the actual key value)"""
     try:
-        repo = ApiKeyRepository(db)
-        api_keys = repo.get_all_api_keys(include_inactive=include_inactive)
-        return [ApiKeySummaryResponse.from_orm(key) for key in api_keys]
+        service = ApiKeyService(db)
+        api_keys = service.repository.get_all_api_keys(include_inactive=include_inactive)
+        return [service.to_summary(key) for key in api_keys]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve API keys: {str(e)}")
 
@@ -65,13 +67,13 @@ async def get_api_keys(include_inactive: bool = False, db: Session = Depends(get
     },
 )
 async def get_api_key(provider: str, db: Session = Depends(get_db)):
-    """Get a specific API key by provider"""
+    """Get a specific API key by provider (is_set + masked_tail only, never the key)"""
     try:
-        repo = ApiKeyRepository(db)
-        api_key = repo.get_api_key_by_provider(provider)
+        service = ApiKeyService(db)
+        api_key = service.repository.get_api_key_by_provider(provider)
         if not api_key:
             raise HTTPException(status_code=404, detail="API key not found")
-        return ApiKeyResponse.from_orm(api_key)
+        return service.to_response(api_key)
     except HTTPException:
         raise
     except Exception as e:
@@ -89,8 +91,8 @@ async def get_api_key(provider: str, db: Session = Depends(get_db)):
 async def update_api_key(provider: str, request: ApiKeyUpdateRequest, db: Session = Depends(get_db)):
     """Update an existing API key"""
     try:
-        repo = ApiKeyRepository(db)
-        api_key = repo.update_api_key(
+        service = ApiKeyService(db)
+        api_key = service.repository.update_api_key(
             provider=provider,
             key_value=request.key_value,
             description=request.description,
@@ -98,7 +100,7 @@ async def update_api_key(provider: str, request: ApiKeyUpdateRequest, db: Sessio
         )
         if not api_key:
             raise HTTPException(status_code=404, detail="API key not found")
-        return ApiKeyResponse.from_orm(api_key)
+        return service.to_response(api_key)
     except HTTPException:
         raise
     except Exception as e:
@@ -163,7 +165,7 @@ async def deactivate_api_key(provider: str, db: Session = Depends(get_db)):
 async def bulk_update_api_keys(request: ApiKeyBulkUpdateRequest, db: Session = Depends(get_db)):
     """Bulk create or update multiple API keys"""
     try:
-        repo = ApiKeyRepository(db)
+        service = ApiKeyService(db)
         api_keys_data = [
             {
                 'provider': key.provider,
@@ -173,8 +175,8 @@ async def bulk_update_api_keys(request: ApiKeyBulkUpdateRequest, db: Session = D
             }
             for key in request.api_keys
         ]
-        api_keys = repo.bulk_create_or_update(api_keys_data)
-        return [ApiKeyResponse.from_orm(key) for key in api_keys]
+        api_keys = service.repository.bulk_create_or_update(api_keys_data)
+        return [service.to_response(key) for key in api_keys]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to bulk update API keys: {str(e)}")
 

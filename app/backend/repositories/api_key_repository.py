@@ -1,16 +1,32 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import func
 from typing import List, Optional
-from datetime import datetime
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session
 
 from app.backend.database.models import ApiKey
+from app.backend.services.crypto import get_cipher, KeyCipher, TAG
 
 
 class ApiKeyRepository:
     """Repository for API key database operations"""
-    
-    def __init__(self, db: Session):
+
+    def __init__(self, db: Session, cipher: KeyCipher | None = None):
         self.db = db
+        self._cipher = cipher
+
+    @property
+    def cipher(self) -> KeyCipher:
+        """Lazily resolve the encryption cipher (default from config). Lazy so an
+        off/unconfigured deployment never resolves a master key, and so constructing a
+        repository for the has_encrypted_rows provisioning probe does not recurse."""
+        if self._cipher is None:
+            self._cipher = get_cipher(self.db)
+        return self._cipher
+
+    def has_encrypted_rows(self) -> bool:
+        """True if any stored key carries the encryption tag — the first-run
+        provisioning guard (genuine first run = no encrypted rows yet)."""
+        return self.db.query(ApiKey).filter(ApiKey.key_value.like(f"{TAG}%")).first() is not None
 
     def create_or_update_api_key(
         self, 
@@ -25,7 +41,7 @@ class ApiKeyRepository:
         
         if existing_key:
             # Update existing key
-            existing_key.key_value = key_value
+            existing_key.key_value = self.cipher.encrypt(key_value)
             existing_key.description = description
             existing_key.is_active = is_active
             existing_key.updated_at = func.now()
@@ -36,7 +52,7 @@ class ApiKeyRepository:
             # Create new key
             api_key = ApiKey(
                 provider=provider,
-                key_value=key_value,
+                key_value=self.cipher.encrypt(key_value),
                 description=description,
                 is_active=is_active
             )
@@ -72,7 +88,7 @@ class ApiKeyRepository:
             return None
 
         if key_value is not None:
-            api_key.key_value = key_value
+            api_key.key_value = self.cipher.encrypt(key_value)
         if description is not None:
             api_key.description = description
         if is_active is not None:
