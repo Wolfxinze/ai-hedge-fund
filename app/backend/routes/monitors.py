@@ -15,11 +15,12 @@ cadence) on the NEXT app restart — not immediately. Manual ``POST /monitors/{i
 
 import logging
 import re
+from contextlib import contextmanager
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.backend.database.connection import get_db
@@ -128,6 +129,25 @@ def _validate_trade_date(value: str) -> None:
         raise HTTPException(status_code=422, detail=f"invalid trade_date '{value}' (expected YYYY-MM-DD)")
 
 
+@contextmanager
+def _db_locked_to_503(db: Session):
+    """Wrap a write section, mapping a SQLite 'database is locked' OperationalError — raised on a
+    ``flush`` OR a ``commit`` — to a 503 (parity with the refresh route's PoolLockDatabaseLockedError
+    → 503 in observing_pools.py), instead of an opaque 500. ``run_monitor``/``create_monitor`` flush
+    BEFORE the route's commit, so the whole write must be guarded, not just the commit.
+    This is ERROR-MAPPING only: it does not make the write concurrency-safe (the atomicity guarantees
+    live in PoolLock); it classifies a contended-DB failure loudly so a client can retry. IntegrityError
+    (duplicate name) and other OperationalErrors are NOT caught here — they propagate to the caller's
+    own handler unchanged."""
+    try:
+        yield
+    except OperationalError as exc:
+        if "database is locked" in str(exc).lower():  # mirrors pool_lock.py's detection
+            db.rollback()
+            raise HTTPException(status_code=503, detail="database is locked; retry shortly")
+        raise
+
+
 @router.get("/monitors")
 def list_monitors(db: Session = Depends(get_db), limit: int = Query(50, ge=1, le=500)) -> list[dict]:
     monitors = db.query(MonitorConfig).order_by(MonitorConfig.id.desc()).limit(limit).all()
@@ -144,11 +164,15 @@ def create_monitor_endpoint(body: MonitorCreateRequest, db: Session = Depends(ge
     _validate_schedule(body.schedule or body.granularity)  # #18 floor on the effective schedule
     if db.query(MonitorConfig).filter_by(name=body.name).first() is not None:
         raise HTTPException(status_code=409, detail=f"monitor '{body.name}' already exists; use PATCH to update")
-    monitor = create_monitor(db, name=body.name, tickers=tickers, granularity=body.granularity, platform_keys=body.platform_keys, selected_analysts=body.selected_analysts)
-    if body.schedule is not None:
-        monitor.schedule = body.schedule  # create_monitor does not set schedule
     try:
-        db.commit()  # get_db does not commit; create_monitor only flush()es
+        # create_monitor flush()es before the commit; guard the whole write so a locked DB on the
+        # flush maps to 503 too (not just the commit). IntegrityError is NOT caught by the CM —
+        # it propagates to the 409 handler below.
+        with _db_locked_to_503(db):
+            monitor = create_monitor(db, name=body.name, tickers=tickers, granularity=body.granularity, platform_keys=body.platform_keys, selected_analysts=body.selected_analysts)
+            if body.schedule is not None:
+                monitor.schedule = body.schedule  # create_monitor does not set schedule
+            db.commit()  # get_db does not commit
     except IntegrityError:
         # The pre-check above handles the common case; this closes the concurrent-create race on the
         # unique name (constraint backstops corruption) — surface the clean 409, not a raw 500.
@@ -186,7 +210,8 @@ def patch_monitor_endpoint(monitor_id: int, body: MonitorPatchRequest, db: Sessi
         _validate_schedule(effective)
     for key, value in fields.items():
         setattr(monitor, key, value)
-    db.commit()
+    with _db_locked_to_503(db):
+        db.commit()
     db.refresh(monitor)
     return _monitor_to_dict(monitor)
 
@@ -205,6 +230,9 @@ def run_monitor_endpoint(
         raise HTTPException(status_code=404, detail=f"monitor {monitor_id} not found")
     trade_date = (body.trade_date if body and body.trade_date else None) or date.today().isoformat()
     _validate_trade_date(trade_date)
-    result = run_monitor(db, monitor, trade_date=trade_date, analyzing_flow=analyzing_flow)
-    db.commit()  # run_monitor only flush()es per report; the route owns the commit
+    # run_monitor flush()es per report (BEFORE the commit), so guard the whole run: a locked DB on a
+    # mid-run flush maps to 503, not an opaque 500.
+    with _db_locked_to_503(db):
+        result = run_monitor(db, monitor, trade_date=trade_date, analyzing_flow=analyzing_flow)
+        db.commit()  # run_monitor only flush()es per report; the route owns the commit
     return {"monitor_name": result.monitor_name, "reports": result.reports, "degraded_count": result.degraded_count, "any_degraded": result.any_degraded}
