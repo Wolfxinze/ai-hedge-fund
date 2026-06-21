@@ -3,7 +3,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { AgentNodeData, OutputNodeData } from '@/contexts/node-context';
 import { useI18n } from '@/i18n/use-i18n';
 import { cn } from '@/lib/utils';
-import { BacktestPerformanceMetrics } from '@/services/types';
+import type { BacktestPerformanceMetrics } from '@/services/types';
 import { MoreHorizontal } from 'lucide-react';
 import { getActionColor } from './output-tab-utils';
 
