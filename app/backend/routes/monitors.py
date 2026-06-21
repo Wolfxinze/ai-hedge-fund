@@ -19,7 +19,7 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.backend.database.connection import get_db
@@ -128,6 +128,21 @@ def _validate_trade_date(value: str) -> None:
         raise HTTPException(status_code=422, detail=f"invalid trade_date '{value}' (expected YYYY-MM-DD)")
 
 
+def _commit_or_503(db: Session) -> None:
+    """Commit, mapping a SQLite 'database is locked' OperationalError to a 503 — parity with the
+    refresh route's PoolLockDatabaseLockedError → 503 (observing_pools.py), instead of an opaque 500.
+    This is ERROR-MAPPING only: it does not make the write concurrency-safe (the atomicity guarantees
+    live in PoolLock); it classifies a contended-DB failure loudly so a client can retry. Other errors
+    (e.g. IntegrityError on a duplicate name) propagate unchanged to the caller's own handler."""
+    try:
+        db.commit()
+    except OperationalError as exc:
+        if "database is locked" in str(exc).lower():  # mirrors pool_lock.py's detection
+            db.rollback()
+            raise HTTPException(status_code=503, detail="database is locked; retry shortly")
+        raise
+
+
 @router.get("/monitors")
 def list_monitors(db: Session = Depends(get_db), limit: int = Query(50, ge=1, le=500)) -> list[dict]:
     monitors = db.query(MonitorConfig).order_by(MonitorConfig.id.desc()).limit(limit).all()
@@ -148,7 +163,7 @@ def create_monitor_endpoint(body: MonitorCreateRequest, db: Session = Depends(ge
     if body.schedule is not None:
         monitor.schedule = body.schedule  # create_monitor does not set schedule
     try:
-        db.commit()  # get_db does not commit; create_monitor only flush()es
+        _commit_or_503(db)  # get_db does not commit; create_monitor only flush()es. locked-DB → 503.
     except IntegrityError:
         # The pre-check above handles the common case; this closes the concurrent-create race on the
         # unique name (constraint backstops corruption) — surface the clean 409, not a raw 500.
@@ -186,7 +201,7 @@ def patch_monitor_endpoint(monitor_id: int, body: MonitorPatchRequest, db: Sessi
         _validate_schedule(effective)
     for key, value in fields.items():
         setattr(monitor, key, value)
-    db.commit()
+    _commit_or_503(db)
     db.refresh(monitor)
     return _monitor_to_dict(monitor)
 
@@ -206,5 +221,5 @@ def run_monitor_endpoint(
     trade_date = (body.trade_date if body and body.trade_date else None) or date.today().isoformat()
     _validate_trade_date(trade_date)
     result = run_monitor(db, monitor, trade_date=trade_date, analyzing_flow=analyzing_flow)
-    db.commit()  # run_monitor only flush()es per report; the route owns the commit
+    _commit_or_503(db)  # run_monitor only flush()es per report; the route owns the commit. locked-DB → 503.
     return {"monitor_name": result.monitor_name, "reports": result.reports, "degraded_count": result.degraded_count, "any_degraded": result.any_degraded}

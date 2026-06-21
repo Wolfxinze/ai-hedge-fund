@@ -14,7 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session as SASession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -300,3 +300,65 @@ def test_create_commit_integrityerror_maps_to_409():
     app.dependency_overrides[get_db] = override_get_db
     client = TestClient(app)
     assert client.post("/monitors", json={"name": "racy", "tickers": ["NVDA"]}).status_code == 409
+
+
+# ── database-locked → 503 (issue #21: parity with the refresh route) ──────────
+# These prove the ERROR-MAPPING only: a SQLite 'database is locked' on a monitor write commit is
+# surfaced as 503 (retryable), not an opaque 500. This is NOT a concurrency-atomicity claim — the
+# real two-writer race guarantees live in PoolLock's file-backed threaded test.
+
+class _LockedCommit(SASession):
+    def commit(self):
+        raise OperationalError("commit", {}, Exception("database is locked"))
+
+
+def _locked_client():
+    """(client whose DB session raises 'database is locked' on commit, seed-sessionmaker)."""
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    m.Base.metadata.create_all(engine)
+    Seed = sessionmaker(bind=engine)  # normal session for seeding rows (commits fine)
+    Locked = sessionmaker(bind=engine, class_=_LockedCommit)
+
+    def override_get_db():
+        s = Locked()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app = FastAPI()
+    app.include_router(monitors_router)
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_analyzing_flow] = lambda: _ok_flow()
+    return TestClient(app), Seed
+
+
+def _seed_monitor(Seed, name="m1"):
+    s = Seed()
+    try:
+        mon = MonitorConfig(name=name, tickers=["NVDA"], granularity="weekly", enabled=True)
+        s.add(mon)
+        s.commit()
+        s.refresh(mon)
+        return mon.id
+    finally:
+        s.close()
+
+
+def test_create_returns_503_on_db_locked():
+    client, _ = _locked_client()
+    r = client.post("/monitors", json={"name": "x", "tickers": ["NVDA"]})
+    assert r.status_code == 503
+    assert "locked" in r.json()["detail"].lower()
+
+
+def test_patch_returns_503_on_db_locked():
+    client, Seed = _locked_client()
+    mid = _seed_monitor(Seed)
+    assert client.patch(f"/monitors/{mid}", json={"granularity": "monthly"}).status_code == 503
+
+
+def test_run_returns_503_on_db_locked():
+    client, Seed = _locked_client()
+    mid = _seed_monitor(Seed)
+    assert client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"}).status_code == 503
