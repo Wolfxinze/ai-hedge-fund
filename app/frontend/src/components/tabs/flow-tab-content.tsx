@@ -36,7 +36,7 @@ export function FlowTabContent({ flow, className }: FlowTabContentProps) {
 
       // Then restore internal states for each node (use-node-state data)
       if (flowToLoad.nodes) {
-        flowToLoad.nodes.forEach((node: any) => {
+        flowToLoad.nodes.forEach((node) => {
           if (node.data?.internal_state) {
             setNodeInternalState(node.id, node.data.internal_state);
           }
@@ -72,6 +72,7 @@ export function FlowTabContent({ flow, className }: FlowTabContentProps) {
 
       fetchAndLoadFlow();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadFlowWithCompleteState omitted to avoid reloading on every render
   }, [activeTabId, flow.id, flow, loadFlow]);
 
   return (

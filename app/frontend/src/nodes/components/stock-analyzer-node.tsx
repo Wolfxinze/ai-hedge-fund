@@ -2,6 +2,8 @@ import { useReactFlow, type NodeProps } from '@xyflow/react';
 import { ChartLine, ChevronDown, Play, Square } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
+import { ModelProvider } from '@/services/types';
+
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { Button } from '@/components/ui/button';
 import { CardContent } from '@/components/ui/card';
@@ -184,7 +186,7 @@ export function StockAnalyzerNode({
         agentModels.push({
           agent_id: node.id,
           model_name: model.model_name,
-          model_provider: model.provider as any
+          model_provider: model.provider as ModelProvider
         });
       }
     }

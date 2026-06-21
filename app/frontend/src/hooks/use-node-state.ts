@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 // =============================================================================
 
 class FlowStateManager {
-  private nodeStatesMap = new Map<string, Record<string, any>>();
+  private nodeStatesMap = new Map<string, Record<string, unknown>>();
   private stateChangeListeners = new Set<() => void>();
   private flowIdChangeListeners = new Set<() => void>();
   private currentFlowId: string | null = null;
@@ -30,13 +30,13 @@ class FlowStateManager {
   }
 
   // State Access
-  getNodeState(nodeId: string, stateKey: string): any {
+  getNodeState(nodeId: string, stateKey: string): unknown {
     const compositeKey = this.createCompositeKey(nodeId);
     const nodeState = this.nodeStatesMap.get(compositeKey);
     return nodeState?.[stateKey];
   }
 
-  setNodeState(nodeId: string, stateKey: string, value: any): void {
+  setNodeState(nodeId: string, stateKey: string, value: unknown): void {
     const compositeKey = this.createCompositeKey(nodeId);
     
     if (!this.nodeStatesMap.has(compositeKey)) {
@@ -48,12 +48,12 @@ class FlowStateManager {
   }
 
   // Node Management
-  getNodeInternalState(nodeId: string): Record<string, any> | undefined {
+  getNodeInternalState(nodeId: string): Record<string, unknown> | undefined {
     const compositeKey = this.createCompositeKey(nodeId);
     return this.nodeStatesMap.get(compositeKey);
   }
 
-  setNodeInternalState(nodeId: string, state: Record<string, any>): void {
+  setNodeInternalState(nodeId: string, state: Record<string, unknown>): void {
     const compositeKey = this.createCompositeKey(nodeId);
     this.nodeStatesMap.set(compositeKey, { ...state });
     this.notifyStateChange();
@@ -66,14 +66,14 @@ class FlowStateManager {
   }
 
   // Flow Management
-  getAllNodeStates(): Map<string, Record<string, any>> {
+  getAllNodeStates(): Map<string, Record<string, unknown>> {
     if (!this.currentFlowId) {
       // Backward compatibility - return all states
       return new Map(this.nodeStatesMap);
     }
     
     // Filter states for current flow and strip flow prefix
-    const currentFlowStates = new Map<string, Record<string, any>>();
+    const currentFlowStates = new Map<string, Record<string, unknown>>();
     const flowPrefix = `${this.currentFlowId}:`;
     
     for (const [compositeKey, state] of this.nodeStatesMap.entries()) {
@@ -149,11 +149,11 @@ export function setCurrentFlowId(flowId: string | null): void {
 }
 
 // Node State Management
-export function getNodeInternalState(nodeId: string): Record<string, any> | undefined {
+export function getNodeInternalState(nodeId: string): Record<string, unknown> | undefined {
   return flowStateManager.getNodeInternalState(nodeId);
 }
 
-export function setNodeInternalState(nodeId: string, state: Record<string, any>): void {
+export function setNodeInternalState(nodeId: string, state: Record<string, unknown>): void {
   flowStateManager.setNodeInternalState(nodeId, state);
 }
 
@@ -162,7 +162,7 @@ export function clearNodeInternalState(nodeId: string): void {
 }
 
 // Flow State Management
-export function getAllNodeStates(): Map<string, Record<string, any>> {
+export function getAllNodeStates(): Map<string, Record<string, unknown>> {
   return flowStateManager.getAllNodeStates();
 }
 
@@ -200,7 +200,7 @@ export function useNodeState<T>(
   // Initialize with stored value or default
   const getStoredValue = useCallback((): T => {
     const storedValue = flowStateManager.getNodeState(nodeId, stateKey);
-    return storedValue !== undefined ? storedValue : defaultValue;
+    return storedValue !== undefined ? (storedValue as T) : defaultValue;
   }, [nodeId, stateKey, defaultValue]);
 
   const [value, setValue] = useState<T>(getStoredValue);
@@ -230,7 +230,7 @@ export function useNodeState<T>(
           setValue(prevValue => {
             if (prevValue !== storedValue) {
               console.debug(`[useNodeState] Updated ${nodeId}.${stateKey}:`, storedValue);
-              return storedValue;
+              return storedValue as T;
             }
             return prevValue;
           });

@@ -49,6 +49,7 @@ export function CloudModels({ className }: CloudModelsProps) {
 
   useEffect(() => {
     fetchProviders();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch providers once on mount
   }, []);
 
   // Flatten all models from all providers into a single array

@@ -42,7 +42,7 @@ export function JsonOutputNode({
     }
   }, [saveToFile, isOutputAvailable, outputNodeData]);
 
-  const saveJsonFile = async (data: any) => {
+  const saveJsonFile = async (data: unknown) => {
     try {
       // Generate filename with current date and time in user's timezone
       const now = new Date();
