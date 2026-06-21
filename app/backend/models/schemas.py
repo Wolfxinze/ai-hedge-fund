@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta
-from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Dict, Any
-from src.llm.models import ModelProvider
 from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field, field_validator
+
 from app.backend.services.graph import extract_base_agent_key
+from src.llm.models import ModelProvider
 
 
 class FlowRunStatus(str, Enum):
@@ -285,7 +287,7 @@ class ApiKeySummaryResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
     last_used: Optional[datetime]
-    has_key: bool = True  # legacy duplicate of is_set; kept for compat, slated for removal
+    has_key: bool = False  # legacy duplicate of is_set; default matches is_set, slated for removal
     is_set: bool = False
     masked_tail: str = ""
 

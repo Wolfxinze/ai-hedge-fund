@@ -1,9 +1,11 @@
+import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.backend.database import get_db
+from app.backend.database.models import ApiKey
 from app.backend.models.schemas import (
     ApiKeyBulkUpdateRequest,
     ApiKeyCreateRequest,
@@ -14,8 +16,15 @@ from app.backend.models.schemas import (
 )
 from app.backend.repositories.api_key_repository import ApiKeyRepository
 from app.backend.services.api_key_service import ApiKeyService
+from app.backend.services.crypto import CryptoError
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api-keys", tags=["api-keys"])
+
+# Returned to the client when encryption/decryption fails — generic on purpose so the
+# master key / keyring details (which the underlying CryptoError message may carry) are
+# logged server-side only and never cross the HTTP boundary.
+_CRYPTO_DETAIL = "Encryption is enabled but the master key could not be used. See server logs."
 
 
 @router.post(
@@ -37,6 +46,9 @@ async def create_or_update_api_key(request: ApiKeyCreateRequest, db: Session = D
             is_active=request.is_active
         )
         return service.to_response(api_key)  # projection only — never returns key_value
+    except CryptoError:
+        logger.error("crypto error on create/update API key", exc_info=True)
+        raise HTTPException(status_code=500, detail=_CRYPTO_DETAIL)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create/update API key: {str(e)}")
 
@@ -54,6 +66,9 @@ async def get_api_keys(include_inactive: bool = False, db: Session = Depends(get
         service = ApiKeyService(db)
         api_keys = service.repository.get_all_api_keys(include_inactive=include_inactive)
         return [service.to_summary(key) for key in api_keys]
+    except CryptoError:
+        logger.error("crypto error on list API keys", exc_info=True)
+        raise HTTPException(status_code=500, detail=_CRYPTO_DETAIL)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve API keys: {str(e)}")
 
@@ -76,6 +91,9 @@ async def get_api_key(provider: str, db: Session = Depends(get_db)):
         return service.to_response(api_key)
     except HTTPException:
         raise
+    except CryptoError:
+        logger.error("crypto error on get API key", exc_info=True)
+        raise HTTPException(status_code=500, detail=_CRYPTO_DETAIL)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve API key: {str(e)}")
 
@@ -103,6 +121,9 @@ async def update_api_key(provider: str, request: ApiKeyUpdateRequest, db: Sessio
         return service.to_response(api_key)
     except HTTPException:
         raise
+    except CryptoError:
+        logger.error("crypto error on update API key", exc_info=True)
+        raise HTTPException(status_code=500, detail=_CRYPTO_DETAIL)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update API key: {str(e)}")
 
@@ -140,16 +161,20 @@ async def delete_api_key(provider: str, db: Session = Depends(get_db)):
 async def deactivate_api_key(provider: str, db: Session = Depends(get_db)):
     """Deactivate an API key without deleting it"""
     try:
-        repo = ApiKeyRepository(db)
-        success = repo.deactivate_api_key(provider)
+        service = ApiKeyService(db)
+        success = service.repository.deactivate_api_key(provider)
         if not success:
             raise HTTPException(status_code=404, detail="API key not found")
-        
-        # Return the updated key
-        api_key = repo.get_api_key_by_provider(provider)
-        return ApiKeySummaryResponse.from_orm(api_key)
+        # Re-read WITHOUT the is_active filter (get_api_key_by_provider would return None
+        # for the now-inactive row). Project through the service so is_set/masked_tail are
+        # correct and key_value can never be emitted.
+        api_key = db.query(ApiKey).filter(ApiKey.provider == provider).first()
+        return service.to_summary(api_key)
     except HTTPException:
         raise
+    except CryptoError:
+        logger.error("crypto error on deactivate API key", exc_info=True)
+        raise HTTPException(status_code=500, detail=_CRYPTO_DETAIL)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to deactivate API key: {str(e)}")
 
@@ -177,6 +202,9 @@ async def bulk_update_api_keys(request: ApiKeyBulkUpdateRequest, db: Session = D
         ]
         api_keys = service.repository.bulk_create_or_update(api_keys_data)
         return [service.to_response(key) for key in api_keys]
+    except CryptoError:
+        logger.error("crypto error on bulk update API keys", exc_info=True)
+        raise HTTPException(status_code=500, detail=_CRYPTO_DETAIL)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to bulk update API keys: {str(e)}")
 

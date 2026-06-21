@@ -7,10 +7,15 @@ makes toggling encryption safe, and the has_encrypted_rows gate is the only guar
 against catastrophic key regeneration.
 """
 
+import logging
+import re
+
 import pytest
 from cryptography.fernet import Fernet
 
 from app.backend.services import crypto
+
+_FERNET_KEY_RE = re.compile(r"[A-Za-z0-9_\-]{43}=")  # urlsafe-base64 Fernet key shape
 from app.backend.services.crypto import (
     _resolve_fernet,
     CryptoError,
@@ -129,14 +134,20 @@ def test_resolution_step3_first_run_with_keyring_provisions():
     assert f.decrypt(f.encrypt(b"x")) == b"x"  # the provisioned key works
 
 
-def test_resolution_step3_headless_first_run_hard_fails_with_key():
+def test_resolution_step3_headless_first_run_logs_key_but_keeps_it_out_of_exception(caplog):
     # No keyring backend (lookup raises) + no env + no rows -> must NOT mint a silent
-    # ephemeral key; instead raise loud with the generated value to pin into env.
+    # ephemeral key. The generated key is LOGGED server-side (so a headless operator can
+    # pin it) but must NOT appear in the exception message — otherwise a `str(exc)` /
+    # HTTP-500 body could transport the master key (the C1 disclosure).
     def _no_backend(ns, item):
         raise RuntimeError("No recommended backend was available")
 
-    with pytest.raises(CryptoMasterKeyError, match="AHF_MASTER_KEY"):
-        _resolve(keyring_get=_no_backend, has_encrypted_rows=lambda: False)
+    with caplog.at_level(logging.ERROR, logger="app.backend.services.crypto"):
+        with pytest.raises(CryptoMasterKeyError, match="AHF_MASTER_KEY") as exc:
+            _resolve(keyring_get=_no_backend, has_encrypted_rows=lambda: False)
+
+    assert not _FERNET_KEY_RE.search(str(exc.value)), "the generated master key must NOT be in the exception message"
+    assert _FERNET_KEY_RE.search(caplog.text), "the generated master key must be logged for the operator to pin"
 
 
 def test_resolution_step4_lost_key_never_regenerates():

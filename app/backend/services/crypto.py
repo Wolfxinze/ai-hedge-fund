@@ -67,7 +67,9 @@ def _keyring_lookup(keyring_get: Callable[[str, str], str | None]) -> tuple[str 
     try:
         return keyring_get(keyring_namespace(), _KEYRING_ITEM), True
     except Exception as exc:  # keyring.errors.NoKeyringError (and any backend error) -> fall through
-        logger.debug("keyring lookup unavailable: %s", exc)
+        # INFO (not debug) + the exception class so a reachable-but-locked keyring is
+        # distinguishable from a genuinely absent backend (fires once per process — cached).
+        logger.info("keyring lookup unavailable (%s: %s); falling back to AHF_MASTER_KEY / provisioning", type(exc).__name__, exc)
         return None, False
 
 
@@ -131,10 +133,17 @@ def _resolve_fernet(
             _FERNET_CACHE = _build_fernet(new_key, source="provisioned keyring master_key")
             return _FERNET_CACHE
         # Headless: never mint a silent ephemeral key (it would regenerate every boot
-        # and orphan rows). Hard-fail with the generated value so the operator pins it.
+        # and orphan rows). Log the generated key for the operator to pin, then hard-fail
+        # WITHOUT the key in the exception message — so no `str(exc)` / HTTP-500 body can
+        # ever transport the master key (the message points to the server log instead).
+        logger.error(
+            "KEY_ENCRYPTION first run with no OS keyring backend and no AHF_MASTER_KEY. A new master "
+            "key was generated; set AHF_MASTER_KEY to the following value and restart: %s", new_key,
+        )
         raise CryptoMasterKeyError(
             "KEY_ENCRYPTION is on but no OS keyring backend is available and AHF_MASTER_KEY is unset. "
-            f"Set AHF_MASTER_KEY to this freshly generated key and restart: {new_key}"
+            "A new master key was generated and written to the server log — set AHF_MASTER_KEY to that "
+            "value and restart."
         )
 
     # Step 4 — encrypted rows exist but no key resolved: loud, terminal (never generate).

@@ -6,15 +6,19 @@ must fail, so we assert both 'no key_value' AND 'masked_tail populated'.
 """
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import app.backend.repositories.api_key_repository as repo_mod
 from app.backend.database.connection import Base, get_db
+from app.backend.database.models import ApiKey
 from app.backend.routes.api_keys import router
 from app.backend.services import crypto
+from app.backend.services.crypto import CryptoMasterKeyError, KeyCipher, TAG
 
 
 @pytest.fixture(autouse=True)
@@ -93,3 +97,58 @@ def test_openapi_schema_has_no_key_value(client):
     props = schema["components"]["schemas"]["ApiKeyResponse"]["properties"]
     assert "key_value" not in props  # regression guard if someone re-adds the field
     assert "is_set" in props and "masked_tail" in props
+
+
+def test_deactivate_projects_through_service(client):
+    client.post("/api-keys/", json={"provider": "OPENAI_API_KEY", "key_value": "sk-secret-zzzz", "is_active": True})
+    r = client.patch("/api-keys/OPENAI_API_KEY/deactivate")
+    assert r.status_code == 200
+    body = r.json()
+    assert "key_value" not in body
+    # The deactivated row is found (no is_active filter) and projected through the service,
+    # so is_set/masked_tail are correct — not the schema defaults a from_orm(None) would force.
+    assert body["is_set"] is True and body["masked_tail"] == "zzzz"
+
+
+def _client_with_engine(monkeypatch, cipher):
+    """A TestClient whose api-key repository uses an injected cipher, plus the engine so
+    a test can inspect the raw stored ciphertext."""
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(repo_mod, "get_cipher", lambda db: cipher)  # the real repo/service wiring path
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_db] = lambda: Session()
+    return TestClient(app), engine
+
+
+def test_encryption_on_stores_ciphertext_but_response_shows_plaintext_tail(monkeypatch):
+    # The seam where both halves of the PR meet: with encryption ON the DB holds
+    # ciphertext, yet masked_tail is the PLAINTEXT last-4 (not the ciphertext tail).
+    key = Fernet.generate_key()
+    on_cipher = KeyCipher(enabled=True, fernet_provider=lambda: Fernet(key))
+    client, engine = _client_with_engine(monkeypatch, on_cipher)
+
+    body = client.post("/api-keys/", json={"provider": "OPENAI_API_KEY", "key_value": "sk-secret-1234", "is_active": True}).json()
+    assert "key_value" not in body and body["masked_tail"] == "1234"
+
+    stored = sessionmaker(bind=engine)().query(ApiKey).filter_by(provider="OPENAI_API_KEY").first().key_value
+    assert stored.startswith(TAG) and "sk-secret-1234" not in stored  # at-rest ciphertext, real get_cipher path
+
+
+def test_crypto_master_key_error_never_leaks_key_in_500(monkeypatch):
+    # The C1 fix: a CryptoMasterKeyError (whose message could carry sensitive text) must
+    # be caught and replaced with a generic 500 — its detail must never reach the body.
+    class _RaisingCipher:
+        def encrypt(self, raw):
+            raise CryptoMasterKeyError("set AHF_MASTER_KEY to this freshly generated key: SUPERSECRETKEY123456")
+
+        def decrypt(self, stored):
+            raise CryptoMasterKeyError("SUPERSECRETKEY123456")
+
+    client, _ = _client_with_engine(monkeypatch, _RaisingCipher())
+    r = client.post("/api-keys/", json={"provider": "OPENAI_API_KEY", "key_value": "sk-x", "is_active": True})
+    assert r.status_code == 500
+    assert "SUPERSECRETKEY123456" not in r.text  # no key material in the response body
+    assert "See server logs" in r.json()["detail"]
