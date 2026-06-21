@@ -106,7 +106,7 @@ export function ApiKeysSettings() {
       const status: Record<string, KeyStatus> = {};
       for (const summary of summaries) {
         status[summary.provider] = {
-          isSet: summary.is_set ?? summary.has_key,
+          isSet: summary.is_set,
           maskedTail: summary.masked_tail ?? '',
         };
       }

@@ -287,7 +287,6 @@ class ApiKeySummaryResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
     last_used: Optional[datetime]
-    has_key: bool = False  # legacy duplicate of is_set; default matches is_set, slated for removal
     is_set: bool = False
     masked_tail: str = ""
 

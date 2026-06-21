@@ -10,6 +10,10 @@ from app.backend.services.crypto import CryptoError, KeyCipher
 
 logger = logging.getLogger(__name__)
 
+# Constant-length mask for keys shorter than 4 chars, so masked_tail never reveals a
+# too-short key's exact length (a theoretical length oracle).
+_SHORT_KEY_MASK = "****"
+
 
 class ApiKeyService:
     """Load + project API keys. The SINGLE decrypt boundary: every internal consumer
@@ -39,10 +43,11 @@ class ApiKeyService:
     # ── route projection (never returns the raw key) ─────────────────────────
     def _project(self, api_key: ApiKey) -> Tuple[bool, str]:
         """Decrypt -> (is_set, masked_tail). masked_tail is the last 4 chars of the
-        PLAINTEXT key (or '*'*len for very short keys, '' when no key). A decrypt
-        failure is surfaced as set-but-unreadable (is_set True, tail '') with a loud
-        server log — the key exists, it just cannot be read, so the UI can prompt a
-        replace rather than silently showing 'not set'."""
+        PLAINTEXT key (a constant '****' sentinel for keys shorter than 4 so the exact
+        length is never revealed, '' when no key). A decrypt failure is surfaced as
+        set-but-unreadable (is_set True, tail '') with a loud server log — the key
+        exists, it just cannot be read, so the UI can prompt a replace rather than
+        silently showing 'not set'."""
         try:
             plaintext = self.cipher.decrypt(api_key.key_value or "")
         except CryptoError:
@@ -52,7 +57,7 @@ class ApiKeyService:
             return False, ""
         if len(plaintext) >= 4:
             return True, plaintext[-4:]
-        return True, "*" * len(plaintext)
+        return True, _SHORT_KEY_MASK  # constant-length: a too-short key's length is never leaked
 
     def to_response(self, api_key: ApiKey) -> ApiKeyResponse:
         is_set, masked_tail = self._project(api_key)
@@ -78,7 +83,6 @@ class ApiKeyService:
             created_at=api_key.created_at,
             updated_at=api_key.updated_at,
             last_used=api_key.last_used,
-            has_key=is_set,
             is_set=is_set,
             masked_tail=masked_tail,
         )

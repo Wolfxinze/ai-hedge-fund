@@ -22,7 +22,6 @@ export interface ApiKeySummary {
   created_at: string;
   updated_at?: string;
   last_used?: string;
-  has_key: boolean;
   is_set: boolean;
   masked_tail: string;
 }

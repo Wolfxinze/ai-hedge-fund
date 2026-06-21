@@ -81,9 +81,13 @@ def test_put_and_bulk_never_leak(client):
     assert all("key_value" not in item for item in bulk.json())
 
 
-def test_short_key_is_fully_masked(client):
-    body = _post(client, "OPENAI_API_KEY", "abc").json()  # len 3 < 4
-    assert body["is_set"] is True and body["masked_tail"] == "***"  # never reveals a too-short key
+def test_short_key_masked_to_constant_no_length_leak(client):
+    # A constant-length sentinel for keys < 4 chars: the response must NOT reveal the
+    # exact length, so a 3-char and a 1-char key both mask to the same "****".
+    three = _post(client, "OPENAI_API_KEY", "abc").json()
+    one = _post(client, "ANTHROPIC_API_KEY", "x").json()
+    assert three["is_set"] is True and three["masked_tail"] == "****"
+    assert one["masked_tail"] == "****"  # length not leaked
 
 
 def test_empty_key_value_rejected_cannot_blank_a_key(client):
