@@ -4,7 +4,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useI18n } from '@/i18n/use-i18n';
 import { cn } from '@/lib/utils';
 import { AlertTriangle, Brain, CheckCircle, Download, Play, RefreshCw, Server, Square, Trash2, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 interface OllamaStatus {
   installed: boolean;
@@ -42,6 +42,12 @@ export function OllamaSettings() {
   const [error, setError] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<Record<string, DownloadProgress>>({});
   const [activeDownloads, setActiveDownloads] = useState<Set<string>>(new Set());
+  // Mirror activeDownloads in a ref so async callbacks (notably reconnectToDownload's dedup
+  // guard) read the CURRENT set rather than a stale render closure — avoids duplicate poll loops.
+  const activeDownloadsRef = useRef(activeDownloads);
+  useEffect(() => {
+    activeDownloadsRef.current = activeDownloads;
+  }, [activeDownloads]);
   const [pollIntervals, setPollIntervals] = useState<Set<NodeJS.Timeout>>(new Set());
   const [deleteConfirmation, setDeleteConfirmation] = useState<{
     isOpen: boolean;
@@ -388,6 +394,9 @@ export function OllamaSettings() {
 
           // Only add truly active downloads to avoid showing completed ones on refresh
           if (progressData.status === 'downloading' || progressData.status === 'starting') {
+            // Claim the slot in the ref synchronously (state commit + the sync effect lag by a
+            // tick) so reconnectToDownload's guard dedups correctly even within this same pass.
+            activeDownloadsRef.current = new Set(activeDownloadsRef.current).add(modelName);
             setActiveDownloads(prev => new Set(prev).add(modelName));
             setDownloadProgress(prev => ({
               ...prev,
@@ -406,8 +415,9 @@ export function OllamaSettings() {
   };
 
   const reconnectToDownload = async (modelName: string) => {
-    // Don't reconnect if we're already tracking this download
-    if (activeDownloads.has(modelName)) {
+    // Don't reconnect if we're already tracking this download. Read the ref (current value)
+    // rather than the captured `activeDownloads` so a freshly-added download isn't double-polled.
+    if (activeDownloadsRef.current.has(modelName)) {
       console.debug(`Already tracking download for ${modelName}`);
       return;
     }

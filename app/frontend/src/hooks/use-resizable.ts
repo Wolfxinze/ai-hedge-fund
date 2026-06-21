@@ -23,66 +23,54 @@ export function useResizable({
   const [height, setHeight] = useState(defaultHeight);
   const [isDragging, setIsDragging] = useState(false);
   const elementRef = useRef<HTMLDivElement>(null);
-  // Add a ref for tracking dragging state - updates synchronously unlike state
-  const isDraggingRef = useRef(false);
 
-  // Handle manual resizing with mouse
+  // Begin a resize: just flip drag state. The document listeners are attached by the effect
+  // below (keyed on isDragging) so their lifecycle is always paired with the drag — no stale
+  // closures and no leak if the component unmounts mid-drag.
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault();
-    // Set both the ref (for immediate use in mousemove) and state (for rendering)
-    isDraggingRef.current = true;
     setIsDragging(true);
+  };
+
+  // Attach mousemove/mouseup ONLY while dragging. The handlers are created inside the effect,
+  // so they close over the CURRENT minWidth/maxWidth/minHeight/maxHeight/side (deps below) —
+  // a mid-drag bounds/side change re-attaches fresh handlers. The cleanup removes exactly the
+  // handlers that were attached (including on unmount during a drag), so nothing leaks.
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      const elementRect = elementRef.current?.getBoundingClientRect();
+      if (!elementRect) return;
+
+      if (side === 'bottom') {
+        // For bottom panel: dragging up decreases height
+        const newHeight = elementRect.bottom - e.clientY;
+        setHeight(Math.max(minHeight, Math.min(maxHeight, newHeight)));
+      } else {
+        // For horizontal resizing (left/right sidebars)
+        let newWidth;
+        if (side === 'left') {
+          // For left sidebar: dragging right increases width
+          newWidth = e.clientX - elementRect.left;
+        } else {
+          // For right sidebar: dragging left decreases width
+          newWidth = elementRect.right - e.clientX;
+        }
+        setWidth(Math.max(minWidth, Math.min(maxWidth, newWidth)));
+      }
+    };
+
+    const stopResize = () => setIsDragging(false);
+
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', stopResize);
-  };
 
-  const handleMouseMove = (e: MouseEvent) => {
-    // Use the ref value instead of state for checking
-    if (!isDraggingRef.current) return;
-    
-    // Get element's position
-    const elementRect = elementRef.current?.getBoundingClientRect();
-    if (!elementRect) return;
-    
-    if (side === 'bottom') {
-      // For bottom panel: dragging up decreases height
-      const newHeight = elementRect.bottom - e.clientY;
-      const clampedHeight = Math.max(minHeight, Math.min(maxHeight, newHeight));
-      setHeight(clampedHeight);
-    } else {
-      // For horizontal resizing (left/right sidebars)
-      let newWidth;
-      if (side === 'left') {
-        // For left sidebar: dragging right increases width
-        newWidth = e.clientX - elementRect.left;
-      } else {
-        // For right sidebar: dragging left decreases width
-        newWidth = elementRect.right - e.clientX;
-      }
-      
-      // Calculate new width (limit between minWidth and maxWidth)
-      newWidth = Math.max(minWidth, Math.min(maxWidth, newWidth));
-      
-      setWidth(newWidth);
-    }
-  };
-
-  const stopResize = () => {
-    // Update both ref and state
-    isDraggingRef.current = false;
-    setIsDragging(false);
-    document.removeEventListener('mousemove', handleMouseMove);
-    document.removeEventListener('mouseup', stopResize);
-  };
-
-  // Clean up event listeners when component unmounts
-  useEffect(() => {
     return () => {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', stopResize);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only cleanup; handlers intentionally not deps
-  }, []);
+  }, [isDragging, minWidth, maxWidth, minHeight, maxHeight, side]);
 
   return {
     width,
@@ -91,4 +79,4 @@ export function useResizable({
     elementRef,
     startResize
   };
-} 
+}
