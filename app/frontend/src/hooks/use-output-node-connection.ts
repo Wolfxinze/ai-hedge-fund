@@ -24,8 +24,9 @@ export function useOutputNodeConnection(nodeId: string) {
     const nodes = getNodes();
     const edges = getEdges();
     
-    // Find edges connected to this output node
-    const connectedEdges = getConnectedEdges([{ id: nodeId }] as any, edges);
+    // Find edges connected to this output node (getConnectedEdges only reads node ids, but the
+    // signature wants full nodes — supply a minimal valid node rather than casting through `any`).
+    const connectedEdges = getConnectedEdges([{ id: nodeId, position: { x: 0, y: 0 }, data: {} }], edges);
     const connectedAgentIds = connectedEdges
       .filter(edge => edge.target === nodeId)
       .map(edge => edge.source)

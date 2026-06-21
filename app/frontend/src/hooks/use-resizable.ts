@@ -81,6 +81,7 @@ export function useResizable({
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', stopResize);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only cleanup; handlers intentionally not deps
   }, []);
 
   return {

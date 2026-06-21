@@ -52,7 +52,7 @@ export const api = {
    * @param data The JSON data to save
    * @returns Promise that resolves when the file is saved
    */
-  saveJsonFile: async (filename: string, data: any): Promise<void> => {
+  saveJsonFile: async (filename: string, data: unknown): Promise<void> => {
     try {
       const response = await fetch(`${API_BASE_URL}/storage/save-json`, {
         method: 'POST',
@@ -258,9 +258,10 @@ export const api = {
               });
             }
           }
-        } catch (error: any) { // Type assertion for error
-          if (error.name !== 'AbortError') {
-            console.error('Error reading SSE stream:', error);
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          if (err.name !== 'AbortError') {
+            console.error('Error reading SSE stream:', err);
             // Mark all agents as error when there's a connection error
             nodeContext.updateAgentNodes(flowId, getAgentIds(), 'ERROR');
 
@@ -268,7 +269,7 @@ export const api = {
             if (flowId) {
               flowConnectionManager.setConnection(flowId, {
                 state: 'error',
-                error: error.message || 'Connection error',
+                error: err.message || 'Connection error',
                 abortController: null,
               });
             }
@@ -279,9 +280,10 @@ export const api = {
       // Start processing the stream
       processStream();
     })
-    .catch((error: any) => { // Type assertion for error
-      if (error.name !== 'AbortError') {
-        console.error('SSE connection error:', error);
+    .catch((error: unknown) => {
+      const err = error instanceof Error ? error : new Error(String(error));
+      if (err.name !== 'AbortError') {
+        console.error('SSE connection error:', err);
         // Mark all agents as error when there's a connection error
         nodeContext.updateAgentNodes(flowId, getAgentIds(), 'ERROR');
 
@@ -289,7 +291,7 @@ export const api = {
         if (flowId) {
           flowConnectionManager.setConnection(flowId, {
             state: 'error',
-            error: error.message || 'Connection failed',
+            error: err.message || 'Connection failed',
             abortController: null,
           });
         }

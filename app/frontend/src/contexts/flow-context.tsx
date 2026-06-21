@@ -4,7 +4,7 @@ import { flowConnectionManager } from '@/hooks/use-flow-connection';
 import { clearAllNodeStates, getAllNodeStates, setNodeInternalState, setCurrentFlowId as setNodeStateFlowId } from '@/hooks/use-node-state';
 import { flowService } from '@/services/flow-service';
 import { Flow } from '@/types/flow';
-import { MarkerType, ReactFlowInstance, useReactFlow, XYPosition } from '@xyflow/react';
+import { Edge, MarkerType, Node, ReactFlowInstance, useReactFlow, XYPosition } from '@xyflow/react';
 import { createContext, ReactNode, useCallback, useContext, useState } from 'react';
 
 interface FlowContextType {
@@ -20,6 +20,7 @@ interface FlowContextType {
 
 const FlowContext = createContext<FlowContextType | null>(null);
 
+// eslint-disable-next-line react-refresh/only-export-components -- context hook colocated with its provider
 export function useFlowContext() {
   const context = useContext(FlowContext);
   if (!context) {
@@ -143,11 +144,11 @@ export function FlowProvider({ children }: FlowProviderProps) {
       // Only restore additional internal states if they exist in the flow data
       if (flow.data) {
         // Handle backward compatibility - data might be direct nodeStates or structured data
-        const dataToRestore = flow.data.nodeStates || flow.data;
-        
+        const dataToRestore = (flow.data.nodeStates || flow.data) as Record<string, unknown>;
+
         if (dataToRestore) {
           Object.entries(dataToRestore).forEach(([nodeId, nodeState]) => {
-            setNodeInternalState(nodeId, nodeState as Record<string, any>);
+            setNodeInternalState(nodeId, nodeState as Record<string, unknown>);
           });
         }
         
@@ -155,8 +156,8 @@ export function FlowProvider({ children }: FlowProviderProps) {
       }
       
       // Now render the nodes - useNodeState hooks will initialize with correct flow ID
-      reactFlowInstance.setNodes(flow.nodes || []);
-      reactFlowInstance.setEdges(flow.edges || []);
+      reactFlowInstance.setNodes((flow.nodes || []) as Node[]);
+      reactFlowInstance.setEdges((flow.edges || []) as Edge[]);
       
       if (flow.viewport) {
         reactFlowInstance.setViewport(flow.viewport);

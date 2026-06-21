@@ -1,14 +1,15 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { AgentNodeData, OutputNodeData } from '@/contexts/node-context';
 import { useI18n } from '@/i18n/use-i18n';
 import { cn } from '@/lib/utils';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { getActionColor, getDisplayName, getSignalColor, getStatusIcon } from './output-tab-utils';
 import { ReasoningContent } from './reasoning-content';
 
 // Progress Section Component
-function ProgressSection({ sortedAgents }: { sortedAgents: [string, any][] }) {
+function ProgressSection({ sortedAgents }: { sortedAgents: [string, AgentNodeData][] }) {
   const { t, translateStatus } = useI18n();
 
   if (sortedAgents.length === 0) return null;
@@ -49,7 +50,7 @@ function ProgressSection({ sortedAgents }: { sortedAgents: [string, any][] }) {
 }
 
 // Summary Section Component
-function SummarySection({ outputData }: { outputData: any }) {
+function SummarySection({ outputData }: { outputData: OutputNodeData | null }) {
   const { t, translateAction } = useI18n();
 
   if (!outputData) return null;
@@ -70,7 +71,7 @@ function SummarySection({ outputData }: { outputData: any }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {Object.entries(outputData.decisions).map(([ticker, decision]: [string, any]) => (
+            {Object.entries(outputData.decisions).map(([ticker, decision]) => (
               <TableRow key={ticker}>
                 <TableCell className="font-medium">{ticker}</TableCell>
                 <TableCell>
@@ -90,13 +91,17 @@ function SummarySection({ outputData }: { outputData: any }) {
 }
 
 // Analysis Results Section Component
-function AnalysisResultsSection({ outputData }: { outputData: any }) {
+function AnalysisResultsSection({ outputData }: { outputData: OutputNodeData | null }) {
   // Always call hooks at the top of the function
   const [selectedTicker, setSelectedTicker] = useState<string>('');
   const { t, translateAction, translateSignal } = useI18n();
 
-  // Calculate tickers (safe to do even if outputData is null)
-  const tickers = outputData?.decisions ? Object.keys(outputData.decisions) : [];
+  // Calculate tickers (safe to do even if outputData is null). Memoized so the effect below
+  // doesn't see a new array reference every render.
+  const tickers = useMemo(
+    () => (outputData?.decisions ? Object.keys(outputData.decisions) : []),
+    [outputData],
+  );
 
   // Set default selected ticker
   useEffect(() => {
@@ -145,11 +150,11 @@ function AnalysisResultsSection({ outputData }: { outputData: any }) {
                   </TableHeader>
                                      <TableBody>
                      {Object.entries(outputData.analyst_signals || {})
-                       .filter(([agent, signals]: [string, any]) =>
+                       .filter(([agent, signals]) =>
                          ticker in signals && !agent.includes("risk_management")
                        )
                        .sort(([agentA], [agentB]) => agentA.localeCompare(agentB))
-                       .map(([agent, signals]: [string, any]) => {
+                       .map(([agent, signals]) => {
                          const signal = signals[ticker];
                          const signalType = signal.signal?.toUpperCase() || 'UNKNOWN';
                          const signalColor = getSignalColor(signalType);
@@ -199,7 +204,7 @@ function AnalysisResultsSection({ outputData }: { outputData: any }) {
                       <TableCell className="font-medium">{t('table.confidence')}</TableCell>
                       <TableCell>{decision.confidence?.toFixed(1) || 0}%</TableCell>
                     </TableRow>
-                    {decision.reasoning && (
+                    {!!decision.reasoning && (
                       <TableRow>
                         <TableCell className="font-medium">{t('table.reasoning')}</TableCell>
                         <TableCell className="max-w-md">
@@ -223,8 +228,8 @@ export function RegularOutput({
   sortedAgents,
   outputData
 }: {
-  sortedAgents: [string, any][];
-  outputData: any;
+  sortedAgents: [string, AgentNodeData][];
+  outputData: OutputNodeData | null;
 }) {
   return (
     <>

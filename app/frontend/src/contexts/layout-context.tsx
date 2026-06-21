@@ -12,6 +12,7 @@ interface LayoutContextType {
 
 const LayoutContext = createContext<LayoutContextType | null>(null);
 
+// eslint-disable-next-line react-refresh/only-export-components -- context hook colocated with its provider
 export function useLayoutContext() {
   const context = useContext(LayoutContext);
   if (!context) {

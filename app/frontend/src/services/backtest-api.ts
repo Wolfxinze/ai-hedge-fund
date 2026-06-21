@@ -4,6 +4,7 @@ import { flowConnectionManager } from '@/hooks/use-flow-connection';
 import {
   BacktestDayResult,
   BacktestPerformanceMetrics,
+  BacktestPeriodResult,
   BacktestRequest
 } from '@/services/types';
 
@@ -50,7 +51,7 @@ export const backtestApi = {
       let buffer = '';
 
       // Local array to accumulate backtest results
-      let backtestResults: any[] = [];
+      let backtestResults: BacktestPeriodResult[] = [];
 
       // Function to process the stream
       const processStream = async () => {
@@ -154,8 +155,9 @@ export const backtestApi = {
                       // Store the complete backtest results
                       if (eventData.data) {
                         const backtestResults = {
-                          decisions: { backtest: { type: 'backtest_complete' } },
+                          decisions: {},
                           analyst_signals: {},
+                          is_backtest: true,
                           performance_metrics: eventData.data.performance_metrics,
                           final_portfolio: eventData.data.final_portfolio,
                           total_days: eventData.data.total_days,
@@ -232,9 +234,10 @@ export const backtestApi = {
               });
             }
           }
-        } catch (error: any) {
-          if (error.name !== 'AbortError') {
-            console.error('Error reading backtest SSE stream:', error);
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          if (err.name !== 'AbortError') {
+            console.error('Error reading backtest SSE stream:', err);
             // Mark nodes as error when there's a connection error
             nodeContext.updateAgentNode(flowId, 'portfolio-start', {
               status: 'ERROR',
@@ -245,7 +248,7 @@ export const backtestApi = {
             if (flowId) {
               flowConnectionManager.setConnection(flowId, {
                 state: 'error',
-                error: error.message || 'Connection error',
+                error: err.message || 'Connection error',
                 abortController: null,
               });
             }
@@ -256,8 +259,9 @@ export const backtestApi = {
       // Start processing the stream
       processStream();
     })
-    .catch((error: any) => {
-      console.error('Backtest SSE connection error:', error);
+    .catch((error: unknown) => {
+      const err = error instanceof Error ? error : new Error(String(error));
+      console.error('Backtest SSE connection error:', err);
       // Mark nodes as error when there's a connection error
       nodeContext.updateAgentNode(flowId, 'portfolio-start', {
         status: 'ERROR',
@@ -268,7 +272,7 @@ export const backtestApi = {
       if (flowId) {
         flowConnectionManager.setConnection(flowId, {
           state: 'error',
-          error: error.message || 'Connection failed',
+          error: err.message || 'Connection failed',
           abortController: null,
         });
       }

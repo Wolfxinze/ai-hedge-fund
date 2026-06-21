@@ -35,6 +35,7 @@ export function useComponentGroups(componentGroups: ComponentGroup[]) {
       // Only reset groups when exiting search mode
       setIsSearching(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- isSearching read but intentionally not a trigger
   }, [searchQuery, filteredGroups]);
 
   // Handle accordion value changes

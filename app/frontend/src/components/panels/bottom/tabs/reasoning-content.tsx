@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { isJsonString } from './output-tab-utils';
 
 // Component to render reasoning content with JSON formatting and copy button
-export function ReasoningContent({ content }: { content: any }) {
+export function ReasoningContent({ content }: { content: unknown }) {
   const [copySuccess, setCopySuccess] = useState(false);
   const { t } = useI18n();
 

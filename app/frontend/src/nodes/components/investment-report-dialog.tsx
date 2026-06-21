@@ -4,7 +4,7 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from '@/components/ui/accordion';
-import { Badge } from '@/components/ui/badge';
+import { Badge, BadgeProps } from '@/components/ui/badge';
 import {
   Card,
   CardContent,
@@ -26,6 +26,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { OutputNodeData } from '@/contexts/node-context';
 import { extractBaseAgentKey } from '@/data/node-mappings';
 import { useI18n } from '@/i18n/use-i18n';
 import { createAgentDisplayNames } from '@/utils/text-utils';
@@ -36,7 +37,7 @@ import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 interface InvestmentReportDialogProps {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
-  outputNodeData: any;
+  outputNodeData: OutputNodeData | null;
   connectedAgentIds: Set<string>;
 }
 
@@ -52,7 +53,7 @@ export function InvestmentReportDialog({
 
   // Check if this is a backtest result and return early if it is
   // Backtest results should be displayed in the backtest output tab, not in the investment report dialog
-  if (outputNodeData?.decisions?.backtest?.type === 'backtest_complete') {
+  if (outputNodeData?.is_backtest) {
     return null;
   }
 
@@ -79,7 +80,7 @@ export function InvestmentReportDialog({
                    signal === 'bearish' ? 'destructive' : 'outline';
 
     return (
-      <Badge variant={variant as any}>
+      <Badge variant={variant as BadgeProps['variant']}>
         {translateSignal(signal)}
       </Badge>
     );
@@ -92,7 +93,7 @@ export function InvestmentReportDialog({
     else variant = 'outline';
     const rounded = Number(confidence.toFixed(1));
     return (
-      <Badge variant={variant as any}>
+      <Badge variant={variant as BadgeProps['variant']}>
         {rounded}%
       </Badge>
     );
@@ -153,7 +154,7 @@ export function InvestmentReportDialog({
                             </div>
                           </TableCell>
                           <TableCell>{decision.quantity}</TableCell>
-                          <TableCell>{getConfidenceBadge(decision.confidence)}</TableCell>
+                          <TableCell>{getConfidenceBadge(decision.confidence ?? 0)}</TableCell>
                         </TableRow>
                       );
                     })}
@@ -195,8 +196,8 @@ export function InvestmentReportDialog({
                                     {agentDisplayNames.get(agent) || agent}
                                   </CardTitle>
                                   <div className="flex items-center gap-2">
-                                    {getSignalBadge(signal.signal)}
-                                    {getConfidenceBadge(signal.confidence)}
+                                    {getSignalBadge(signal.signal ?? '')}
+                                    {getConfidenceBadge(signal.confidence ?? 0)}
                                   </div>
                                 </div>
                               </CardHeader>

@@ -1,4 +1,10 @@
 import { LanguageModel } from '@/data/models';
+import {
+  AnalystSignalDetail,
+  BacktestPeriodResult,
+  BacktestPosition,
+  TradingDecision,
+} from '@/services/types';
 import { createContext, ReactNode, useCallback, useContext, useState } from 'react';
 
 export type NodeStatus = 'IDLE' | 'IN_PROGRESS' | 'COMPLETE' | 'ERROR';
@@ -20,13 +26,17 @@ export interface AgentNodeData {
   messages: MessageItem[];
   timestamp?: string;
   analysis: string | null;
-  backtestResults?: any[];
+  backtestResults?: BacktestPeriodResult[];
 }
 
 // Data structure for the output node data (from complete event)
 export interface OutputNodeData {
-  decisions: Record<string, any>;
-  analyst_signals: Record<string, any>;
+  decisions: Record<string, TradingDecision>;
+  analyst_signals: Record<string, Record<string, AnalystSignalDetail>>;
+  current_prices?: Record<string, number>;
+  // Set by the backtest stream so the investment-report dialog can skip backtest output
+  // (which renders in the backtest tab instead). Replaces the old decisions.backtest marker.
+  is_backtest?: boolean;
   // Backtest-specific fields
   performance_metrics?: {
     sharpe_ratio?: number;
@@ -40,7 +50,7 @@ export interface OutputNodeData {
   final_portfolio?: {
     cash: number;
     margin_used: number;
-    positions: Record<string, any>;
+    positions: Record<string, BacktestPosition>;
   };
   total_days?: number;
 }
@@ -429,6 +439,7 @@ export function NodeProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- context hook colocated with its provider
 export function useNodeContext() {
   const context = useContext(NodeContext);
 

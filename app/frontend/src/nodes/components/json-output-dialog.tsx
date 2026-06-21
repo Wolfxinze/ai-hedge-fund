@@ -10,12 +10,13 @@ import {
     DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog';
+import { OutputNodeData } from '@/contexts/node-context';
 import { useI18n } from '@/i18n/use-i18n';
 
 interface JsonOutputDialogProps {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
-  outputNodeData: any;
+  outputNodeData: OutputNodeData | null;
   connectedAgentIds: Set<string>;
 }
 
