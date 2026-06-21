@@ -362,3 +362,30 @@ def test_run_returns_503_on_db_locked():
     client, Seed = _locked_client()
     mid = _seed_monitor(Seed)
     assert client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"}).status_code == 503
+
+
+# ── flush-locked path: run_monitor/create_monitor flush BEFORE the route commit, so a locked DB
+# on the FLUSH (not just the commit) must also map to 503. These FAIL without the context-manager
+# guard around the whole write — _LockedCommit (which overrides only commit) cannot catch them.
+def _raise_locked(*_a, **_k):
+    raise OperationalError("flush", {}, Exception("database is locked"))
+
+
+def test_run_returns_503_on_flush_locked(env, monkeypatch):
+    import app.backend.routes.monitors as mon
+
+    s = env.SessionLocal()
+    row = MonitorConfig(name="m", tickers=["NVDA"], granularity="weekly", enabled=True)
+    s.add(row)
+    s.commit()
+    mid = row.id
+    s.close()
+    monkeypatch.setattr(mon, "run_monitor", _raise_locked)  # realistic mid-run flush-locked failure
+    assert env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"}).status_code == 503
+
+
+def test_create_returns_503_on_flush_locked(env, monkeypatch):
+    import app.backend.routes.monitors as mon
+
+    monkeypatch.setattr(mon, "create_monitor", _raise_locked)  # locked on create's flush
+    assert env.client.post("/monitors", json={"name": "x", "tickers": ["NVDA"]}).status_code == 503
