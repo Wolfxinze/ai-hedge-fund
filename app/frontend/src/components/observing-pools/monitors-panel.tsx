@@ -43,9 +43,14 @@ export function MonitorsPanel() {
   const [runError, setRunError] = useState<string | null>(null);
 
   // Guards setState after unmount across the user-triggered async paths (load/create/run).
+  // Re-set to true in the effect body so a React StrictMode remount (which runs cleanup once)
+  // restores it — otherwise every guard would stay false and data would never load.
   const mounted = useRef(true);
-  useEffect(() => () => {
-    mounted.current = false;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
   }, []);
 
   // Show a translated label for the known granularities; fall back to the raw value (e.g. "custom").

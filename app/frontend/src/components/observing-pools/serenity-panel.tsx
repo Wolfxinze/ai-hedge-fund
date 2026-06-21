@@ -18,10 +18,14 @@ export function SerenityPanel() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Guards setState after unmount: the search is user-triggered (not an effect), so a fetch can be
-  // in flight when the panel/tab is closed.
+  // in flight when the panel/tab is closed. Re-set to true in the effect body so a React StrictMode
+  // remount (which runs cleanup once) restores it — otherwise results would never render.
   const mounted = useRef(true);
-  useEffect(() => () => {
-    mounted.current = false;
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
   }, []);
 
   const search = (event: FormEvent) => {
