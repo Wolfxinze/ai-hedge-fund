@@ -51,12 +51,12 @@ class SerenityResearchRecord(Base):
     """One bottleneck research record per theme/candidate."""
 
     __tablename__ = "serenity_research_records"
-    # Defense in depth (PRD §12/§20): NOT NULL admits an empty-string disclaimer;
-    # this CHECK rejects blank/whitespace-only at the DB layer. It matters most
-    # here because the GET /serenity/research projection bypasses serialize_report
-    # (a serialize_serenity chokepoint is a deferred follow-up), so the CHECK is
-    # this path's only guard — hence the explicit space+tab+newline+CR trim set
-    # (bare SQLite trim() strips only ASCII space).
+    # Defense in depth (PRD §12/§20): NOT NULL admits an empty-string disclaimer; this CHECK rejects
+    # blank/whitespace-only at the DB layer. It composes with the serialization layer — the
+    # GET /serenity/research projection routes through ``serialize_serenity`` (parity with
+    # ``serialize_report``), which additionally rejects non-ASCII whitespace (e.g. a non-breaking
+    # space \xa0) that this CHECK's ASCII trim set admits — hence the explicit space+tab+newline+CR
+    # trim set here (bare SQLite trim() strips only ASCII space).
     __table_args__ = (
         CheckConstraint("length(trim(disclaimer, ' ' || char(9) || char(10) || char(13))) > 0 AND length(trim(disclaimer_version, ' ' || char(9) || char(10) || char(13))) > 0", name="ck_serenity_research_records_disclaimer_nonempty"),
     )
