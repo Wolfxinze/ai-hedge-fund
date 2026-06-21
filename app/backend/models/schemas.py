@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta
-from pydantic import BaseModel, Field, field_validator
-from typing import List, Optional, Dict, Any
-from src.llm.models import ModelProvider
 from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field, field_validator
+
 from app.backend.services.graph import extract_base_agent_key
+from src.llm.models import ModelProvider
 
 
 class FlowRunStatus(str, Enum):
@@ -257,10 +259,14 @@ class ApiKeyUpdateRequest(BaseModel):
 
 
 class ApiKeyResponse(BaseModel):
-    """Complete API key response"""
+    """API key projection — NEVER exposes the raw key (PRD v4 §9.10 X6).
+
+    ``key_value`` is intentionally absent (it was the read-back hole). ``is_set`` drives
+    the "key is configured" UI; ``masked_tail`` reveals only the last few characters."""
     id: int
     provider: str
-    key_value: str
+    is_set: bool
+    masked_tail: str
     is_active: bool
     description: Optional[str]
     created_at: datetime
@@ -272,7 +278,8 @@ class ApiKeyResponse(BaseModel):
 
 
 class ApiKeySummaryResponse(BaseModel):
-    """API key response without the actual key value"""
+    """API key list item — also key-free. is_set + masked_tail let the frontend drive
+    off the single list call with no per-key read-back."""
     id: int
     provider: str
     is_active: bool
@@ -280,7 +287,9 @@ class ApiKeySummaryResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
     last_used: Optional[datetime]
-    has_key: bool = True  # Indicates if a key is set
+    has_key: bool = False  # legacy duplicate of is_set; default matches is_set, slated for removal
+    is_set: bool = False
+    masked_tail: str = ""
 
     class Config:
         from_attributes = True

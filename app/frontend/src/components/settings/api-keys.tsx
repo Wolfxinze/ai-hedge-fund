@@ -76,36 +76,41 @@ const LLM_API_KEYS: ApiKey[] = [
   }
 ];
 
+interface KeyStatus {
+  isSet: boolean;
+  maskedTail: string;
+}
+
 export function ApiKeysSettings() {
-  const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+  // Per-provider status (never the raw secret); a transient draft for the replace flow.
+  const [keyStatus, setKeyStatus] = useState<Record<string, KeyStatus>>({});
+  const [draftKey, setDraftKey] = useState<Record<string, string>>({});
+  const [isReplacing, setIsReplacing] = useState<Record<string, boolean>>({});
   const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { t } = useI18n();
 
-  // Load API keys from backend on component mount
+  // Load API keys from backend on component mount (run once).
   useEffect(() => {
     loadApiKeys();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadApiKeys = async () => {
     try {
       setLoading(true);
       setError(null);
-      const apiKeysSummary = await apiKeysService.getAllApiKeys();
-
-      // Load actual key values for existing keys
-      const keysData: Record<string, string> = {};
-      for (const summary of apiKeysSummary) {
-        try {
-          const fullKey = await apiKeysService.getApiKey(summary.provider);
-          keysData[summary.provider] = fullKey.key_value;
-        } catch (err) {
-          console.warn(`Failed to load key for ${summary.provider}:`, err);
-        }
+      // One list call — the raw secret is never fetched into the browser.
+      const summaries = await apiKeysService.getAllApiKeys();
+      const status: Record<string, KeyStatus> = {};
+      for (const summary of summaries) {
+        status[summary.provider] = {
+          isSet: summary.is_set ?? summary.has_key,
+          maskedTail: summary.masked_tail ?? '',
+        };
       }
-
-      setApiKeys(keysData);
+      setKeyStatus(status);
     } catch (err) {
       console.error('Failed to load API keys:', err);
       setError(t('apiKeys.loadError'));
@@ -114,30 +119,40 @@ export function ApiKeysSettings() {
     }
   };
 
-  const handleKeyChange = async (key: string, value: string) => {
-    // Update local state immediately for responsive UI
-    setApiKeys(prev => ({
-      ...prev,
-      [key]: value
-    }));
+  const startReplace = (key: string) => {
+    setIsReplacing(prev => ({ ...prev, [key]: true }));
+    setDraftKey(prev => ({ ...prev, [key]: '' }));
+  };
 
-    // Auto-save with debouncing
+  const cancelReplace = (key: string) => {
+    setIsReplacing(prev => ({ ...prev, [key]: false }));
+    setDraftKey(prev => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setVisibleKeys(prev => ({ ...prev, [key]: false }));
+  };
+
+  // Editing only updates the transient draft — NO network call, so an empty input
+  // can never auto-save or delete a stored key.
+  const handleDraftChange = (key: string, value: string) => {
+    setDraftKey(prev => ({ ...prev, [key]: value }));
+  };
+
+  const saveKey = async (key: string) => {
+    const value = (draftKey[key] ?? '').trim();
+    if (!value) return; // the only write path; an empty draft never writes
     try {
-      if (value.trim()) {
-        await apiKeysService.createOrUpdateApiKey({
-          provider: key,
-          key_value: value.trim(),
-          is_active: true
-        });
-      } else {
-        // If value is empty, delete the key
-        try {
-          await apiKeysService.deleteApiKey(key);
-        } catch (err) {
-          // Key might not exist, which is fine
-          console.log(`Key ${key} not found for deletion, which is expected`);
-        }
-      }
+      await apiKeysService.createOrUpdateApiKey({ provider: key, key_value: value, is_active: true });
+      setIsReplacing(prev => ({ ...prev, [key]: false }));
+      setDraftKey(prev => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      setVisibleKeys(prev => ({ ...prev, [key]: false }));
+      await loadApiKeys();
     } catch (err) {
       console.error(`Failed to save API key ${key}:`, err);
       setError(t('apiKeys.saveError', { key }));
@@ -154,10 +169,10 @@ export function ApiKeysSettings() {
   const clearKey = async (key: string) => {
     try {
       await apiKeysService.deleteApiKey(key);
-      setApiKeys(prev => {
-        const newKeys = { ...prev };
-        delete newKeys[key];
-        return newKeys;
+      setKeyStatus(prev => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
       });
     } catch (err) {
       console.error(`Failed to delete API key ${key}:`, err);
@@ -175,49 +190,74 @@ export function ApiKeysSettings() {
         <p className="text-sm text-muted-foreground">{description}</p>
       </CardHeader>
       <CardContent className="space-y-4">
-        {keys.map((apiKey) => (
+        {keys.map((apiKey) => {
+          const status = keyStatus[apiKey.key];
+          const isSet = status?.isSet ?? false;
+          const replacing = isReplacing[apiKey.key] ?? false;
+          return (
           <div key={apiKey.key} className="space-y-2">
-                         <button
-               className="text-sm font-medium text-primary hover:text-blue-500 cursor-pointer transition-colors text-left"
-               onClick={() => window.open(apiKey.url, '_blank')}
-             >
-               {apiKey.label}
-             </button>
-            <div className="relative">
-              <Input
-                type={visibleKeys[apiKey.key] ? 'text' : 'password'}
-                placeholder={apiKey.placeholder}
-                value={apiKeys[apiKey.key] || ''}
-                onChange={(e) => handleKeyChange(apiKey.key, e.target.value)}
-                className="pr-20"
-              />
-              <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1">
-                {apiKeys[apiKey.key] && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 hover:bg-red-500/10 hover:text-red-500"
-                    onClick={() => clearKey(apiKey.key)}
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                )}
+            <button
+              className="text-sm font-medium text-primary hover:text-blue-500 cursor-pointer transition-colors text-left"
+              onClick={() => window.open(apiKey.url, '_blank')}
+            >
+              {apiKey.label}
+            </button>
+            {isSet && !replacing ? (
+              // Configured: a masked read-only view — the secret is never in the DOM.
+              <div className="flex items-center gap-2">
+                <div className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm font-mono text-muted-foreground">
+                  {'••••••••'}{status?.maskedTail ? ` ${status.maskedTail}` : ''}
+                </div>
+                <Button variant="outline" size="sm" onClick={() => startReplace(apiKey.key)}>
+                  {t('apiKeys.replace')}
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-7 w-7"
-                  onClick={() => toggleKeyVisibility(apiKey.key)}
+                  className="h-9 w-9 hover:bg-red-500/10 hover:text-red-500"
+                  onClick={() => clearKey(apiKey.key)}
                 >
-                  {visibleKeys[apiKey.key] ? (
-                    <EyeOff className="h-3 w-3" />
-                  ) : (
-                    <Eye className="h-3 w-3" />
-                  )}
+                  <Trash2 className="h-3 w-3" />
                 </Button>
               </div>
-            </div>
+            ) : (
+              // Not set, or replacing: edit a transient draft; Save is the only write.
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Input
+                    type={visibleKeys[apiKey.key] ? 'text' : 'password'}
+                    placeholder={t('apiKeys.enterKey')}
+                    value={draftKey[apiKey.key] || ''}
+                    onChange={(e) => handleDraftChange(apiKey.key, e.target.value)}
+                    className="pr-10"
+                  />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
+                    onClick={() => toggleKeyVisibility(apiKey.key)}
+                  >
+                    {visibleKeys[apiKey.key] ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                  </Button>
+                </div>
+                <Button
+                  variant="default"
+                  size="sm"
+                  disabled={!(draftKey[apiKey.key] || '').trim()}
+                  onClick={() => saveKey(apiKey.key)}
+                >
+                  {t('apiKeys.save')}
+                </Button>
+                {isSet && (
+                  <Button variant="ghost" size="sm" onClick={() => cancelReplace(apiKey.key)}>
+                    {t('apiKeys.cancel')}
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
-        ))}
+          );
+        })}
       </CardContent>
     </Card>
   );

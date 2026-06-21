@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Register observing-pool tables on the shared Base so create_all discovers them
 # (PRD v4 §8.1 model-discovery). Import is for its registration side-effect.
 import src.storage.models  # noqa: F401
+from app.backend.cors import cors_allowed_origins
 from app.backend.database.connection import engine
 from app.backend.database.models import Base
 from app.backend.routes import api_router
@@ -25,12 +26,12 @@ Base.metadata.create_all(bind=engine)
 # Phase 8 in-process scheduler handle (set on startup, stopped on shutdown).
 _scheduler = None
 
-# Configure CORS
+# Configure CORS — loopback allowlist + only the verbs the API actually serves.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # Frontend URLs
+    allow_origins=cors_allowed_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
