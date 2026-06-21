@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.backend.database.connection import get_db
-from src.monitoring.serialize import serialize_report
+from src.monitoring.serialize import serialize_report, serialize_serenity
 from src.observing_pools.pipeline import refresh_pool, RefreshConfig, RunAnalysts
 from src.observing_pools.platforms import PLATFORM_KEYS
 from src.observing_pools.pool_lock import (
@@ -212,22 +212,7 @@ def get_serenity(ticker: str, db: Session = Depends(get_db), limit: int = Query(
     if not _TICKER_RE.match(ticker):
         raise HTTPException(status_code=422, detail=f"invalid ticker '{ticker}'")
     records = db.query(SerenityResearchRecord).filter_by(ticker=ticker.upper()).order_by(SerenityResearchRecord.id.desc()).limit(limit).all()
-    return [
-        {
-            "id": r.id,
-            "ticker": r.ticker,
-            "platform_key": r.platform_key,
-            "theme": r.theme,
-            "chain_layer": r.chain_layer,
-            "bottleneck_hypothesis": r.bottleneck_hypothesis,
-            "evidence_grade": r.evidence_grade,
-            "serenity_score": r.serenity_score,
-            "recommended_action": r.recommended_action,
-            "disclaimer": r.disclaimer,
-            "disclaimer_version": r.disclaimer_version,
-        }
-        for r in records
-    ]
+    return [serialize_serenity(r) for r in records]  # disclaimer invariant enforced here (§9.9 every GET route)
 
 
 @router.get("/opportunity-reports")
