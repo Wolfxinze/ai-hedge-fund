@@ -48,7 +48,10 @@ export function OllamaSettings() {
   useEffect(() => {
     activeDownloadsRef.current = activeDownloads;
   }, [activeDownloads]);
-  const [pollIntervals, setPollIntervals] = useState<Set<NodeJS.Timeout>>(new Set());
+  // Poll intervals are tracked in a ref, not state: a state commit lags the setInterval call, so an
+  // unmount in that window (or a cleanup closing over a stale snapshot) could leak the interval. A
+  // ref is always current, and the []-deps unmount effect below clears every one of them.
+  const pollIntervalsRef = useRef<Set<ReturnType<typeof setInterval>>>(new Set());
   const [deleteConfirmation, setDeleteConfirmation] = useState<{
     isOpen: boolean;
     modelName: string;
@@ -246,7 +249,7 @@ export function OllamaSettings() {
                         return newSet;
                       });
                       if (data.status === 'error') {
-                        setError(`Download failed for ${modelName}: ${data.message || data.error}`);
+                        setError(`Download failed for ${modelName}: ${data.message || data.error || 'Unknown error'}`);
                       }
                       // Clean up progress display after 3 seconds for errors/cancellations
                       setTimeout(() => {
@@ -409,8 +412,11 @@ export function OllamaSettings() {
         });
       }
     } catch (error) {
-      // Ignore errors - probably no active downloads or server not available
-      console.debug('No active downloads found or error checking:', error);
+      // A throw here means the request itself failed (network/parse) — NOT "no active downloads".
+      // Warn only (no banner): this probe runs before any download is added to tracking, and
+      // fetchOllamaStatus already owns the user-facing backend-connection banner — a second one
+      // here would just duplicate it.
+      console.warn('Could not check for active downloads (Ollama backend may be unreachable):', error);
     }
   };
 
@@ -424,12 +430,18 @@ export function OllamaSettings() {
 
     console.log(`Monitoring existing download for ${modelName}`);
 
+    // Keep polling through transient failures; only give up (and surface it) after several in a row,
+    // so a network blip doesn't silently abandon an in-flight download.
+    let consecutiveFailures = 0;
+    const MAX_POLL_FAILURES = 3;
+
     // Poll for progress updates instead of starting a new stream
     const pollProgress = async () => {
       try {
         // Check all active downloads instead of individual model
         const response = await fetch('http://localhost:8000/ollama/models/downloads/active');
         if (response.ok) {
+          consecutiveFailures = 0;
           const activeDownloads = await response.json();
           const progress = activeDownloads[modelName];
 
@@ -486,7 +498,7 @@ export function OllamaSettings() {
                 return newSet;
               });
               if (progress.status === 'error') {
-                setError(`Download failed for ${modelName}: ${progress.message || progress.error}`);
+                setError(`Download failed for ${modelName}: ${progress.message || progress.error || 'Unknown error'}`);
               }
               // Clean up progress display after 3 seconds for errors/cancellations
               setTimeout(() => {
@@ -510,13 +522,39 @@ export function OllamaSettings() {
             return false; // Stop polling
           }
         } else {
-          // Error getting active downloads, stop polling
-          console.error(`Error getting active downloads: ${response.status}`);
-          return false; // Stop polling
+          // Transient server error — keep polling up to MAX_POLL_FAILURES before giving up.
+          consecutiveFailures++;
+          console.warn(`Active-downloads check returned HTTP ${response.status} for ${modelName} (${consecutiveFailures}/${MAX_POLL_FAILURES})`);
+          if (consecutiveFailures >= MAX_POLL_FAILURES) {
+            setError(`Lost connection while tracking the ${modelName} download.`);
+            // Release tracking (the [activeDownloads] effect syncs the ref) so the row resets and a
+            // later checkForActiveDownloads / manual re-download isn't blocked by the dedup guard.
+            setActiveDownloads(prev => {
+              const newSet = new Set(prev);
+              newSet.delete(modelName);
+              return newSet;
+            });
+            return false; // give up
+          }
+          return true; // keep polling
         }
       } catch (error) {
-        console.error(`Error polling progress for ${modelName}:`, error);
-        return false; // Stop polling on error
+        // Network blip — keep polling up to MAX_POLL_FAILURES so a transient failure doesn't
+        // silently abandon an in-flight download.
+        consecutiveFailures++;
+        console.warn(`Error polling progress for ${modelName} (${consecutiveFailures}/${MAX_POLL_FAILURES}):`, error);
+        if (consecutiveFailures >= MAX_POLL_FAILURES) {
+          setError(`Lost connection while tracking the ${modelName} download.`);
+          // Release tracking (the [activeDownloads] effect syncs the ref) so the row resets and a
+          // later checkForActiveDownloads / manual re-download isn't blocked by the dedup guard.
+          setActiveDownloads(prev => {
+            const newSet = new Set(prev);
+            newSet.delete(modelName);
+            return newSet;
+          });
+          return false; // give up
+        }
+        return true; // keep polling
       }
     };
 
@@ -525,26 +563,18 @@ export function OllamaSettings() {
       const shouldContinue = await pollProgress();
       if (!shouldContinue) {
         clearInterval(pollInterval);
-        setPollIntervals(prev => {
-          const newSet = new Set(prev);
-          newSet.delete(pollInterval);
-          return newSet;
-        });
+        pollIntervalsRef.current.delete(pollInterval);
       }
     }, 2000);
 
     // Track the interval for cleanup
-    setPollIntervals(prev => new Set(prev).add(pollInterval));
+    pollIntervalsRef.current.add(pollInterval);
 
     // Do an initial poll
     const shouldContinue = await pollProgress();
     if (!shouldContinue) {
       clearInterval(pollInterval);
-      setPollIntervals(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(pollInterval);
-        return newSet;
-      });
+      pollIntervalsRef.current.delete(pollInterval);
     }
   };
 
@@ -561,12 +591,15 @@ export function OllamaSettings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only re-runs on running status / model-count change
   }, [ollamaStatus?.running, recommendedModels.length]); // Only depend on running status and whether we have models
 
-  // Cleanup polling intervals on unmount
+  // Cleanup polling intervals on unmount. []-deps + ref means this always sees and clears every
+  // interval (the old state-snapshot cleanup could miss one created just before unmount).
   useEffect(() => {
+    const intervals = pollIntervalsRef.current;
     return () => {
-      pollIntervals.forEach(interval => clearInterval(interval));
+      intervals.forEach((interval) => clearInterval(interval));
+      intervals.clear();
     };
-  }, [pollIntervals]);
+  }, []);
 
   const getStatusIcon = () => {
     if (!ollamaStatus) return <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />;
