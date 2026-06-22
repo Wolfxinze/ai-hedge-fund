@@ -15,7 +15,7 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from src.monitoring.runner import AnalyzingFlow, run_monitor
-from src.observing_pools.pipeline import RefreshConfig, RunAnalysts
+from src.observing_pools.pipeline import DEFAULT_UNIVERSE, RefreshConfig, RunAnalysts
 from src.observing_pools.platforms import PLATFORM_KEYS
 from src.observing_pools.pool_lock import (
     PoolLockContendedError,
@@ -26,8 +26,6 @@ from src.storage import session_scope
 from src.storage.models import MonitorConfig
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_UNIVERSE = "data/universes/ai_seed.csv"  # matches the observing_pools CLI default
 
 SessionFactory = Callable[[], AbstractContextManager[Session]]
 

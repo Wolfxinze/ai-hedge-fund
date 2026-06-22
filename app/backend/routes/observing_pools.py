@@ -17,7 +17,12 @@ from sqlalchemy.orm import Session
 
 from app.backend.database.connection import get_db
 from src.monitoring.serialize import serialize_report, serialize_serenity
-from src.observing_pools.pipeline import refresh_pool, RefreshConfig, RunAnalysts
+from src.observing_pools.pipeline import (
+    DEFAULT_UNIVERSE,
+    refresh_pool,
+    RefreshConfig,
+    RunAnalysts,
+)
 from src.observing_pools.platforms import PLATFORM_KEYS
 from src.observing_pools.pool_lock import (
     PoolLockContendedError,
@@ -39,10 +44,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _REFRESH_RUN_STATUSES = {s.value for s in RefreshRunStatus}
-
-# Default candidate universe for an API-triggered refresh — mirrors the CLI + scheduler defaults
-# (src/observing_pools/cli.py, src/scheduler/jobs.py). Not client-settable in v1 (loopback tool).
-DEFAULT_UNIVERSE = "data/universes/ai_seed.csv"
 
 SessionFactory = Callable[[], AbstractContextManager[Session]]
 
