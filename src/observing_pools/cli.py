@@ -13,7 +13,7 @@ import sys
 from datetime import date
 from functools import partial
 
-from src.observing_pools.pipeline import refresh_pool, RefreshConfig
+from src.observing_pools.pipeline import DEFAULT_UNIVERSE, refresh_pool, RefreshConfig
 from src.observing_pools.platforms import init_platforms, PLATFORM_KEYS
 from src.observing_pools.pool_lock import (
     PoolLockContendedError,
@@ -23,8 +23,6 @@ from src.observing_pools.pool_lock import (
 from src.observing_pools.universe import load_seed_csv, upsert_candidates
 from src.storage import engine, session_scope
 from src.storage.models import Base, ObservationPoolEntry, RefreshRunStatus
-
-DEFAULT_UNIVERSE = "data/universes/ai_seed.csv"
 
 
 def _positive_int(value: str) -> int:

@@ -20,7 +20,9 @@ from src.evals.runner import run_suite, SuiteReport
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_RUN_DIR = "evals_runs"
+# Anchored to the project root (this file is src/evals/reporting.py → parents[2] is the repo
+# root) so eval runs always land in <root>/evals_runs/ regardless of the process CWD.
+DEFAULT_RUN_DIR = str(Path(__file__).resolve().parents[2] / "evals_runs")
 
 
 def write_transcripts(transcripts: list[Transcript], path: str | Path) -> Path:

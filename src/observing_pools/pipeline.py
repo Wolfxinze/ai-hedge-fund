@@ -35,6 +35,10 @@ from src.storage.models import (
     RefreshRunStatus,
 )
 
+# Single source of truth for the seed universe CSV, shared by the refresh API route,
+# the scheduler job, and the CLI (was defined independently in all three — drift risk).
+DEFAULT_UNIVERSE = "data/universes/ai_seed.csv"
+
 
 class RunAnalysts(Protocol):
     def __call__(self, tickers: list[str], selected_analysts: list[str], end_date: str) -> tuple[dict[str, dict[str, dict]], dict]:
