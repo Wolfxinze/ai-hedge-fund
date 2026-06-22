@@ -65,10 +65,18 @@ export function useResizable({
 
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', stopResize);
+    // Backstop: a mouseup released outside the document never fires the document listener, which
+    // would leave the drag stuck. Ending it on window blur recovers that case.
+    window.addEventListener('blur', stopResize);
+    // Suppress text/element selection across the page while dragging.
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.userSelect = 'none';
 
     return () => {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', stopResize);
+      window.removeEventListener('blur', stopResize);
+      document.body.style.userSelect = previousUserSelect;
     };
   }, [isDragging, minWidth, maxWidth, minHeight, maxHeight, side]);
 
