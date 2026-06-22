@@ -169,11 +169,10 @@ export function ApiKeysSettings() {
   const clearKey = async (key: string) => {
     try {
       await apiKeysService.deleteApiKey(key);
-      setKeyStatus(prev => {
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
+      // Re-sync from the backend (authoritative) rather than an optimistic local delete, so the
+      // displayed key-presence state always reflects the server — mirrors saveKey. Key-presence is
+      // security-sensitive: it must never be shown from an unconfirmed optimistic mutation.
+      await loadApiKeys();
     } catch (err) {
       console.error(`Failed to delete API key ${key}:`, err);
       setError(t('apiKeys.deleteError', { key }));
@@ -214,6 +213,7 @@ export function ApiKeysSettings() {
                 <Button
                   variant="ghost"
                   size="icon"
+                  aria-label={t('apiKeys.deleteKey', { label: apiKey.label })}
                   className="h-9 w-9 hover:bg-red-500/10 hover:text-red-500"
                   onClick={() => clearKey(apiKey.key)}
                 >
