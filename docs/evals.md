@@ -37,8 +37,11 @@ The suites pin the env knobs they depend on so a run is deterministic:
 | `SERENITY_HOST_ALLOWLIST` | SSRF/evidence allowlist (extends the default) | unset → built-in allowlist |
 
 The evals assert against the **real shipped constants**, e.g. the composite
-formula versions are `v3-4comp` / `v3-5comp` (the code; the PRD text says `v4-*`
-— a naming drift tracked as a follow-up, not "fixed" inside an eval).
+formula versions are `v3-4comp` / `v3-5comp` (`src/observing_pools/scoring.py`),
+where `v3` is the composite formula's own version axis and `-4comp` / `-5comp`
+mark the 4-component (pre-Serenity) and 5-component (Serenity-folded) variants.
+These strings are the source of truth — the evals assert them verbatim, never a
+reformatted label.
 
 ## Grader taxonomy (`src/evals/core.py`)
 
