@@ -52,6 +52,19 @@ export function OllamaSettings() {
   // unmount in that window (or a cleanup closing over a stale snapshot) could leak the interval. A
   // ref is always current, and the []-deps unmount effect below clears every one of them.
   const pollIntervalsRef = useRef<Set<ReturnType<typeof setInterval>>>(new Set());
+  // One-shot timeouts (the recursive refreshWithRetry kicks + the 3s progress-cleanup timers) are
+  // tracked the same way so the unmount effect can clear any still pending — otherwise a fired-after
+  // -unmount timer calls setState on an unmounted component. scheduleTimeout self-removes its id on
+  // fire so the set stays bounded.
+  const pollTimeoutsRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+  const scheduleTimeout = (fn: () => void, ms: number) => {
+    const id = setTimeout(() => {
+      pollTimeoutsRef.current.delete(id);
+      fn();
+    }, ms);
+    pollTimeoutsRef.current.add(id);
+    return id;
+  };
   const [deleteConfirmation, setDeleteConfirmation] = useState<{
     isOpen: boolean;
     modelName: string;
@@ -227,20 +240,20 @@ export function OllamaSettings() {
                             // Check if the model is now in the available models list
                             if (attempts < 5 && status && !status.available_models.includes(modelName)) {
                               // Wait a bit longer and try again
-                              setTimeout(() => refreshWithRetry(attempts + 1), 2000);
+                              scheduleTimeout(() => refreshWithRetry(attempts + 1), 2000);
                             }
                           } else if (attempts < 5) {
                             // If fetch failed, retry
-                            setTimeout(() => refreshWithRetry(attempts + 1), 2000);
+                            scheduleTimeout(() => refreshWithRetry(attempts + 1), 2000);
                           }
                         } catch (error) {
                           console.error('Failed to refresh status:', error);
                           if (attempts < 5) {
-                            setTimeout(() => refreshWithRetry(attempts + 1), 2000);
+                            scheduleTimeout(() => refreshWithRetry(attempts + 1), 2000);
                           }
                         }
                       };
-                      setTimeout(() => refreshWithRetry(), 2000);
+                      scheduleTimeout(() => refreshWithRetry(), 2000);
                       return; // Exit the function
                     } else if (data.status === 'error' || data.status === 'cancelled') {
                       setActiveDownloads(prev => {
@@ -252,7 +265,7 @@ export function OllamaSettings() {
                         setError(`Download failed for ${modelName}: ${data.message || data.error || 'Unknown error'}`);
                       }
                       // Clean up progress display after 3 seconds for errors/cancellations
-                      setTimeout(() => {
+                      scheduleTimeout(() => {
                         setDownloadProgress(prev => {
                           const newProgress = { ...prev };
                           delete newProgress[modelName];
@@ -476,20 +489,20 @@ export function OllamaSettings() {
                     // Check if the model is now in the available models list
                     if (attempts < 5 && status && !status.available_models.includes(modelName)) {
                       // Wait a bit longer and try again
-                      setTimeout(() => refreshWithRetry(attempts + 1), 2000);
+                      scheduleTimeout(() => refreshWithRetry(attempts + 1), 2000);
                     }
                   } else if (attempts < 5) {
                     // If fetch failed, retry
-                    setTimeout(() => refreshWithRetry(attempts + 1), 2000);
+                    scheduleTimeout(() => refreshWithRetry(attempts + 1), 2000);
                   }
                 } catch (error) {
                   console.error('Failed to refresh status:', error);
                   if (attempts < 5) {
-                    setTimeout(() => refreshWithRetry(attempts + 1), 2000);
+                    scheduleTimeout(() => refreshWithRetry(attempts + 1), 2000);
                   }
                 }
               };
-              setTimeout(() => refreshWithRetry(), 2000);
+              scheduleTimeout(() => refreshWithRetry(), 2000);
               return false; // Stop polling
             } else if (progress.status === 'error' || progress.status === 'cancelled') {
               setActiveDownloads(prev => {
@@ -501,7 +514,7 @@ export function OllamaSettings() {
                 setError(`Download failed for ${modelName}: ${progress.message || progress.error || 'Unknown error'}`);
               }
               // Clean up progress display after 3 seconds for errors/cancellations
-              setTimeout(() => {
+              scheduleTimeout(() => {
                 setDownloadProgress(prev => {
                   const newProgress = { ...prev };
                   delete newProgress[modelName];
@@ -591,13 +604,17 @@ export function OllamaSettings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only re-runs on running status / model-count change
   }, [ollamaStatus?.running, recommendedModels.length]); // Only depend on running status and whether we have models
 
-  // Cleanup polling intervals on unmount. []-deps + ref means this always sees and clears every
-  // interval (the old state-snapshot cleanup could miss one created just before unmount).
+  // Cleanup polling intervals AND pending one-shot timeouts on unmount. []-deps + refs mean this
+  // always sees and clears every timer (the old state-snapshot cleanup could miss one created just
+  // before unmount), so nothing fires setState on an unmounted component.
   useEffect(() => {
     const intervals = pollIntervalsRef.current;
+    const timeouts = pollTimeoutsRef.current;
     return () => {
       intervals.forEach((interval) => clearInterval(interval));
       intervals.clear();
+      timeouts.forEach((timeout) => clearTimeout(timeout));
+      timeouts.clear();
     };
   }, []);
 

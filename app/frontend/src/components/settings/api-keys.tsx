@@ -234,6 +234,11 @@ export function ApiKeysSettings() {
                   <Button
                     variant="ghost"
                     size="icon"
+                    aria-label={
+                      visibleKeys[apiKey.key]
+                        ? t('apiKeys.hideKey', { label: apiKey.label })
+                        : t('apiKeys.showKey', { label: apiKey.label })
+                    }
                     className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
                     onClick={() => toggleKeyVisibility(apiKey.key)}
                   >

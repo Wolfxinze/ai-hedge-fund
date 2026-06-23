@@ -123,3 +123,92 @@ test('API Keys settings: deleting a key issues one DELETE then re-fetches the au
   // set, so presence is SERVER-driven, not an optimistic removal.
   await expect(openAiRow.getByText('ab12')).toBeVisible();
 });
+
+// Adverse path A: when the DELETE itself is rejected, clearKey must surface the delete error AND
+// NOT re-sync — the row stays configured (no optimistic removal of a key that was never deleted).
+// This is the security-load-bearing half of "presence reflects the server, never an unconfirmed
+// mutation": a failed delete must not visually drop the key.
+test('API Keys settings: a rejected DELETE shows the delete error and keeps the configured row (no refetch)', async ({ page }) => {
+  await mockBackend(page);
+
+  // Reject only the OpenAI DELETE; every other call falls through to the hermetic base mock.
+  await page.route(
+    (url) => url.host === 'localhost:8000' && url.pathname.startsWith('/api-keys/'),
+    async (route) => {
+      if (route.request().method() === 'DELETE') {
+        return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'delete boom' }) });
+      }
+      return route.fallback();
+    },
+  );
+
+  const listGets: string[] = [];
+  page.on('request', (req) => {
+    const u = new URL(req.url());
+    if (u.host === 'localhost:8000' && req.method() === 'GET' && u.pathname === '/api-keys') listGets.push(u.pathname);
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open Settings' }).click();
+
+  const openAiRow = page
+    .locator('div.space-y-2')
+    .filter({ has: page.getByRole('button', { name: 'OpenAI API', exact: true }) });
+  await expect(openAiRow.getByText('ab12')).toBeVisible();
+  await expect.poll(() => listGets.length).toBeGreaterThanOrEqual(1); // initial mount load(s) settled
+  const listGetsBeforeDelete = listGets.length;
+
+  await openAiRow.getByRole('button', { name: 'Delete OpenAI API key' }).click();
+
+  // The delete-error banner appears (clearKey's catch fires on the rejected DELETE)…
+  await expect(page.getByText(/Failed to delete OPENAI_API_KEY/)).toBeVisible();
+  // …the row stays configured (presence is NOT optimistically removed on a failed delete)…
+  await expect(openAiRow.getByText('ab12')).toBeVisible();
+  // …and NO re-sync GET fired: clearKey only refetches AFTER a delete actually succeeds.
+  await page.waitForLoadState('networkidle');
+  expect(listGets.length, 'a failed delete must not trigger a re-sync GET').toBe(listGetsBeforeDelete);
+});
+
+// Adverse path B: the DELETE succeeds but the authoritative refetch then fails. loadApiKeys swallows
+// its own error and surfaces the load-error banner (it never rethrows, so clearKey's catch can't fire
+// from the refetch). Presence is preserved (keyStatus is not cleared on a failed load) and self-heals
+// on the next successful load via "Try again". The failure is gated on a test-flipped flag (not a GET
+// count) so StrictMode's double mount-load can't be the one that fails.
+test('API Keys settings: a failed post-delete refetch shows the load error and self-heals on retry', async ({ page }) => {
+  await mockBackend(page);
+
+  let failNextListGet = false;
+  await page.route(
+    (url) => url.host === 'localhost:8000' && url.pathname === '/api-keys',
+    async (route) => {
+      if (route.request().method() === 'GET' && failNextListGet) {
+        failNextListGet = false; // fail exactly the one refetch, then let "Try again" recover
+        return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'load boom' }) });
+      }
+      return route.fallback();
+    },
+  );
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Open Settings' }).click();
+
+  const openAiRow = page
+    .locator('div.space-y-2')
+    .filter({ has: page.getByRole('button', { name: 'OpenAI API', exact: true }) });
+  await expect(openAiRow.getByText('ab12')).toBeVisible();
+  await page.waitForLoadState('networkidle'); // let any StrictMode double mount-load settle FIRST
+
+  // Arm the failure so the post-delete refetch (not a mount load) is the GET that fails.
+  failNextListGet = true;
+  await openAiRow.getByRole('button', { name: 'Delete OpenAI API key' }).click();
+
+  // The DELETE succeeded but the refetch failed → the load-error banner shows (NOT the delete error)…
+  await expect(page.getByText(/Failed to load API keys/)).toBeVisible();
+  // …and presence is preserved (keyStatus is untouched on a failed load), so the row never blanks.
+  await expect(openAiRow.getByText('ab12')).toBeVisible();
+
+  // Self-heal: "Try again" re-loads; the flag is already spent, so this GET succeeds and clears the banner.
+  await page.getByRole('button', { name: 'Try again' }).click();
+  await expect(page.getByText(/Failed to load API keys/)).toBeHidden();
+  await expect(openAiRow.getByText('ab12')).toBeVisible();
+});
