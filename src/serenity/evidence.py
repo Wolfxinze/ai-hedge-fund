@@ -86,14 +86,17 @@ _FUNCTION_WORDS = frozenset({
 
 
 def _figures(text: str | None) -> set[str]:
-    """Normalized claim quantities (e.g. {"40%", "2.4b", "3nm"}). A bare integer —
-    a year, count, version, or form number — is dropped: it is incidental to prose,
-    not a quantity a backing source must echo."""
+    """Normalized numeric quantities found in `text` (e.g. {"40%", "2.4b", "3nm"}).
+    A bare integer — a year, count, version, or form number — is dropped: it is
+    incidental to prose, not a quantity a backing source must echo."""
     out: set[str] = set()
     for dollar, num, unit in _FIGURE_RE.findall((text or "").lower()):
-        suffix = _SCALE.get(unit, unit) or ("$" if dollar else "")
-        if not suffix:  # bare number — not a claimed quantity
-            continue
+        if unit:
+            suffix = _SCALE.get(unit, unit)  # normalize scale words / %, else keep the unit
+        elif dollar:
+            suffix = "$"
+        else:
+            continue  # bare number — a year/count/version, not a claimed quantity
         out.add(num.replace(",", "") + suffix)
     return out
 
@@ -140,7 +143,8 @@ def is_substantiated(claim: str | None, excerpt: str | None, min_overlap: float 
 def substantiation_reason(claim: str | None, excerpt: str | None, stype: SourceType, min_overlap: float = _MIN_OVERLAP) -> str:
     """Coarse, deterministic reason a reference did/didn't substantiate — for
     observability, so a withheld grade is auditable (unverified host vs missing/
-    short excerpt vs no overlap). Does NOT change the grade math."""
+    short excerpt vs no overlap vs claimed-figure absent vs keyword-stuffing). Does
+    NOT change the grade math."""
     if stype is SourceType.UNVERIFIED:
         return "unverified_host"
     excerpt_tokens = _tokens(excerpt)
