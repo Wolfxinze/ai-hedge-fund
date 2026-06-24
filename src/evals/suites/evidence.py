@@ -2,7 +2,8 @@
 - a known-fake citation on an off-allowlist host (incl. userinfo spoof) is
   UNVERIFIED -> never substantiates -> grade F, even with perfect text overlap;
 - a 200-but-irrelevant page does not substantiate (overlap gate, not HTTP status);
-- URL-flooding is bounded by the per-host cap and stuffing yields one bool, not weight;
+- URL-flooding is bounded by the per-host cap; a keyword-salad excerpt is rejected
+  (§11.5 stuffing signal) while the same terms in genuine prose still substantiate;
 - zero substantiated -> F -> serenity_score withheld (None, not 0);
 - a GENUINE allowlisted, substantiated source DOES count (balanced should-do control).
 Pure functions + hardcoded fixtures; no DB, no network, no LLM.
@@ -69,14 +70,17 @@ def _flooding_and_stuffing_capped(rec: Recorder) -> bool:
     ]
     if grade_evidence(distinct) != EvidenceGrade.B:  # 3+2 = 5 -> B
         return False
-    # A keyword-dense excerpt that overlaps the claim substantiates exactly ONCE
-    # (one boolean) — density cannot compound into extra weight; the per-host cap
-    # bounds flooding. (Density-as-stuffing-signal per PRD §11.5 is a documented
-    # gap; is_substantiated is overlap-only today — the eval asserts CURRENT behavior.)
-    stuffed = "gallium nitride supplier concentration bottleneck epitaxy capacity expansion validation cycle certification"
-    one = is_substantiated("gallium nitride supplier bottleneck epitaxy", stuffed)
-    rec.record("grade_evidence", flooded="C", distinct="B", stuffed_substantiated=one)
-    return one is True  # stuffing yields a single bool; volume cannot manufacture a grade
+    # §11.5 stuffing signal (now ENFORCED): a keyword salad — claim terms packed
+    # with NO function words — is rejected outright, so fabricated density cannot
+    # manufacture substantiation. The same terms in a genuine sentence (with
+    # connective words) still count. Per-host cap + allowlist remain the bounds above.
+    claim = "gallium nitride supplier bottleneck epitaxy"
+    salad = "gallium nitride supplier concentration bottleneck epitaxy capacity expansion validation cycle certification"
+    prose = "the filing discloses gallium nitride supplier concentration as a bottleneck for epitaxy capacity expansion"
+    stuffed_rejected = is_substantiated(claim, salad) is False
+    genuine_counts = is_substantiated(claim, prose) is True
+    rec.record("grade_evidence", flooded="C", distinct="B", stuffed_rejected=stuffed_rejected, genuine_counts=genuine_counts)
+    return stuffed_rejected and genuine_counts  # volume/density cannot manufacture a grade
 
 
 def _zero_substantiated_withholds(rec: Recorder) -> bool:
