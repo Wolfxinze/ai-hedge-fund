@@ -11,6 +11,7 @@ user-provided excerpts; live fetching + SSRF hardening is an expansion phase
 """
 
 import re
+import unicodedata
 from urllib.parse import urlparse
 
 from src.storage.models import SourceType
@@ -52,8 +53,24 @@ def source_type_for_host(host: str | None, allowlist: dict[str, SourceType] = DE
     return SourceType.UNVERIFIED
 
 
+def _norm(text: str | None) -> str:
+    """Lowercased + Unicode-NFKC-folded text. NFKC collapses full-width and other
+    compatibility forms (４０％ -> "40%", µ -> μ) so a fabricated excerpt cannot evade
+    the ASCII word/figure gates by spelling figures in look-alike codepoints.
+
+    Category-``No`` characters (superscripts ², subscripts, fractions ½, circled ①)
+    are replaced with a SPACE BEFORE NFKC: their compatibility decompositions are
+    bare ASCII digits that would otherwise glue onto an adjacent number and *mint* a
+    figure never printed — both by appending (``10²%`` -> ``102%``) and, if deleted,
+    by joining the digits a superscript separated (``4²0%`` -> ``40%``). A space is a
+    token/figure boundary, so neither glue occurs. Full-width digits are category
+    ``Nd`` (not ``No``), so the intended fold (``４０％`` -> ``40%``) is preserved."""
+    cleaned = "".join(" " if unicodedata.category(c) == "No" else c for c in (text or ""))
+    return unicodedata.normalize("NFKC", cleaned).lower()
+
+
 def _tokens(text: str | None) -> set[str]:
-    return {w for w in _WORD_RE.findall((text or "").lower()) if len(w) >= 3}
+    return {w for w in _WORD_RE.findall(_norm(text)) if len(w) >= 3}
 
 
 # §11.5 numeric-aware gate. A "figure" is a *quantity*: a number carrying a unit,
@@ -62,10 +79,16 @@ def _tokens(text: str | None) -> set[str]:
 # a quantity the source must echo, and gating on it would falsely reject genuine
 # backing text. The negative lookbehind keeps model identifiers out (the "100" in
 # "h100" is glued to a letter); the trailing boundary keeps a unit from swallowing
-# an adjacent word's prefix ("50bps" must not read as "50 billion").
+# an adjacent word's prefix ("50bps" must not read as "50 billion"). Matched on
+# NFKC-folded text (see _norm), so ４０％ ≡ 40% and the micrometre unit is the folded
+# μm — the micro sign µ (U+00B5) has already become greek mu μ (U+03BC) by the time
+# this matches. The word "times" is deliberately NOT a unit: "N times" almost always
+# means occasions, not an "Nx" multiplier, so promoting it would mint a phantom
+# figure requirement and suppress genuinely-backed claims (same ambiguity class as
+# "$1,200" vs a bare "1200" — an ambiguous number is not gated, per §11.5).
 _FIGURE_RE = re.compile(
     r"(?<![a-z0-9])(\$?)(\d[\d,]*(?:\.\d+)?)\s?"
-    r"(%|percent|pct|nm|µm|um|ghz|mhz|kw|mw|gw|billion|trillion|million|thousand|bn|b|m|t|k|x)?"
+    r"(%|percent|pct|nm|μm|um|ghz|mhz|kw|mw|gw|billion|trillion|million|thousand|bn|b|m|t|k|x)?"
     r"(?![a-z0-9])"
 )
 _SCALE = {"billion": "b", "bn": "b", "trillion": "t", "million": "m", "thousand": "k", "percent": "%", "pct": "%"}
@@ -90,7 +113,7 @@ def _figures(text: str | None) -> set[str]:
     A bare integer — a year, count, version, or form number — is dropped: it is
     incidental to prose, not a quantity a backing source must echo."""
     out: set[str] = set()
-    for dollar, num, unit in _FIGURE_RE.findall((text or "").lower()):
+    for dollar, num, unit in _FIGURE_RE.findall(_norm(text)):
         if unit:
             suffix = _SCALE.get(unit, unit)  # normalize scale words / %, else keep the unit
         elif dollar:
@@ -109,7 +132,7 @@ def _claim_figures_missing(claim: str | None, excerpt: str | None) -> bool:
 
 def _is_keyword_salad(excerpt: str | None) -> bool:
     """True iff a long-enough excerpt has zero function words (keyword stuffing)."""
-    words = _WORD_RE.findall((excerpt or "").lower())
+    words = _WORD_RE.findall(_norm(excerpt))
     if len(words) < _MIN_EXCERPT_WORDS:
         return False
     return not any(w in _FUNCTION_WORDS for w in words)

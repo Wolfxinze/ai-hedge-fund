@@ -13,6 +13,8 @@ excerpt is still "no_overlap", never "keyword_stuffing". Model identifiers like
 """
 
 from src.serenity.evidence import (
+    _figures,
+    _is_keyword_salad,
     classify_reference,
     is_substantiated,
     substantiation_reason,
@@ -140,3 +142,86 @@ def test_classify_reference_threads_new_gates():
     assert out["source_type"] == SourceType.FILING
     assert out["substantiated"] is False
     assert out["reason"] == "keyword_stuffing"
+
+
+# ── §11.5 polish (#43): surface-form folding + contract pinning ──────────────────
+
+def test_fullwidth_digits_normalize():
+    # A fabricated excerpt that writes the figure in full-width digits (４０％) must
+    # not evade the ASCII numeric gate: NFKC folds it to "40%", so a genuine match
+    # still substantiates while a wrong full-width number still rejects.
+    claim = "gallium nitride wafer supply fell 40% amid a capacity bottleneck"
+    fw_right = "the filing notes gallium nitride wafer supply fell ４０％ on a capacity bottleneck"
+    fw_wrong = "the filing notes gallium nitride wafer supply fell ２５％ on a capacity bottleneck"
+    assert is_substantiated(claim, fw_right) is True
+    assert is_substantiated(claim, fw_wrong) is False
+    assert substantiation_reason(claim, fw_wrong, SourceType.FILING) == "figure_missing"
+
+
+def test_superscript_digits_do_not_mint_a_figure():
+    # NFKC must NOT decompose a superscript digit onto an adjacent number and mint a
+    # figure never printed — neither by APPENDING ("10²%" must not read as "102%",
+    # "²5%" must not read as "25%") nor by JOINING the digits a superscript SEPARATES
+    # ("4²0%" must not read as "40%"). A human reads ² as a footnote mark, not a digit.
+    assert _figures("growth of 10²%") == {"10%"}      # the ² is dropped, not glued to 10
+    assert _figures("a ²5% move") == {"5%"}           # not 25%
+    assert "40%" not in _figures("a 4²0% jump")       # a separator ² must not glue 4 + 0 -> 40
+    claim = "gallium nitride capacity rose 102% over the prior bottleneck cycle this year"
+    excerpt = "the filing notes gallium nitride capacity rose 10²% over the prior bottleneck cycle this year"
+    assert is_substantiated(claim, excerpt) is False
+    assert substantiation_reason(claim, excerpt, SourceType.FILING) == "figure_missing"
+
+
+def test_times_is_not_promoted_to_a_multiplier_figure():
+    # "N times" is ambiguous — in filings it almost always means OCCASIONS, not an
+    # "Nx" multiplier. Promoting it to a required figure would suppress genuine
+    # backing phrased differently ("on three occasions"). Per §11.5 (an ambiguous
+    # number is not gated), "times" is not a unit, so the claim still substantiates.
+    claim = "the company restated gallium nitride capacity guidance 3 times this year amid the bottleneck"
+    excerpt = "the filing shows the company restated gallium nitride capacity guidance on three occasions amid the bottleneck"
+    assert is_substantiated(claim, excerpt) is True
+    assert _figures("met with suppliers 5 times") == set()  # occasions, not 5x
+
+
+def test_wrong_and_missing_both_map_to_figure_missing():
+    # G2: the gate intentionally COARSE-merges "states a different number" and
+    # "omits the number" into one auditable reason — pin that they are not split.
+    claim = "gallium nitride wafer supply fell 40% amid a capacity bottleneck"
+    wrong = "the filing notes gallium nitride wafer supply fell 25% on a capacity bottleneck this year"
+    missing = "the filing notes gallium nitride wafer supply fell sharply on a capacity bottleneck this year"
+    r_wrong = substantiation_reason(claim, wrong, SourceType.FILING)
+    r_missing = substantiation_reason(claim, missing, SourceType.FILING)
+    assert r_wrong == r_missing == "figure_missing"
+
+
+def test_identifier_digits_do_not_satisfy_a_figure():
+    # G3: a digit run glued to a letter (h100m) is an identifier, not a figure — it
+    # must NOT satisfy a claim stating the same UNIT-BEARING figure (100m). Pins the
+    # lookbehind: without it, "h100m" would mint the figure 100m and falsely match.
+    claim = "the gallium nitride line added 100m of capacity amid the bottleneck this year"
+    excerpt = "the h100m gallium nitride line added capacity amid the bottleneck this year"
+    assert is_substantiated(claim, excerpt) is False
+    assert substantiation_reason(claim, excerpt, SourceType.FILING) == "figure_missing"
+
+
+def test_keyword_salad_word_count_boundary():
+    # G4: the stuffing gate fires only at >= _MIN_EXCERPT_WORDS words. Seven
+    # function-word-free words are below the floor (not salad); eight are at it.
+    seven = "alpha beta gamma delta epsilon zeta eta"
+    eight = "alpha beta gamma delta epsilon zeta eta theta"
+    assert _is_keyword_salad(seven) is False
+    assert _is_keyword_salad(eight) is True
+
+
+def test_keyword_salad_gate_sees_through_fullwidth():
+    # The salad gate runs on NFKC-folded text (_norm), so a full-width-spelled bag of
+    # eight content words is still detected as stuffing — it cannot evade the ASCII
+    # word matcher by using look-alike codepoints.
+    fullwidth_eight = "ａｌｐｈａ ｂｅｔａ ｇａｍｍａ ｄｅｌｔａ ｅｐｓｉｌｏｎ ｚｅｔａ ｅｔａ ｔｈｅｔａ"
+    assert _is_keyword_salad(fullwidth_eight) is True
+
+
+def test_micrometre_unit_normalizes_both_codepoints():
+    # The micrometre figure must match whether written with the micro sign (µ, U+00B5)
+    # or a greek mu (μ, U+03BC); NFKC folds the former to the latter.
+    assert _figures("a 3µm node") == _figures("a 3μm node") == {"3μm"}
