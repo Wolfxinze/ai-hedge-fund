@@ -1,4 +1,4 @@
-"""Monitor CRUD + manual-run API (PRD v4 §14 / §9.7, Phase 9).
+"""Monitor CRUD + manual-run API (PRD v4 §14 / §9.7, Phase 9 / Issue #21).
 
 Loopback-bound research-only surface: a run reaches only ``run_monitor`` → ``serialize_report``
 (every report carries the disclaimer), NEVER ``run_hedge_fund`` or any order/trade path. Bare
@@ -8,9 +8,9 @@ older ``flows.py`` Pydantic-envelope style — a deliberate convention choice, s
 A schedule is validated against the Issue-#18 minimum-interval floor (``resolve_trigger_checked``) so
 an API client cannot register a monitor that fires faster than its multi-minute job completes.
 
-HOT-RELOAD CAVEAT: the in-process scheduler snapshots enabled monitors at build time only
-(``src/scheduler/scheduler.py``). A monitor created/edited here begins firing (or picks up a changed
-cadence) on the NEXT app restart — not immediately. Manual ``POST /monitors/{id}/run`` is unaffected.
+HOT-RELOAD (Phase 9 / Issue #21): monitors now hot-reload on create/edit — the live scheduler job is
+registered/updated/removed immediately after each successful DB write via ``_safe_reschedule``. Manual
+``POST /monitors/{id}/run`` is unaffected (always synchronous).
 """
 
 import logging
@@ -18,7 +18,8 @@ import re
 from contextlib import contextmanager
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from apscheduler.schedulers.background import BackgroundScheduler
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -28,11 +29,42 @@ from src.integrations.tradingagents_adapter import run_analyzing_flow
 from src.monitoring.runner import AnalyzingFlow, create_monitor, run_monitor
 from src.observing_pools.platforms import PLATFORM_KEYS
 from src.scheduler.cron_map import resolve_trigger_checked, ScheduleTooFrequentError
+from src.scheduler.scheduler import reschedule_monitor
 from src.storage.models import Granularity, MonitorConfig
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def get_scheduler(request: Request) -> BackgroundScheduler | None:
+    """FastAPI dependency: return the live BackgroundScheduler from app.state, or None if the
+    scheduler failed to start. Routes use this for hot-reload and must tolerate None gracefully."""
+    return getattr(request.app.state, "scheduler", None)
+
+
+def _safe_reschedule(scheduler: BackgroundScheduler | None, monitor: MonitorConfig) -> None:
+    """Best-effort hot-reload: call reschedule_monitor but never let a scheduling failure propagate.
+    Rationale: the DB write is the source of truth. A scheduling side-effect failure must NOT 500 a
+    successful create/edit (the next app restart re-snapshots the live monitors). The failure is
+    logged LOUDLY via logger.exception so ops sees it — never silently swallowed."""
+    if scheduler is None:
+        # Degraded mode: scheduler failed to build/start. The row IS persisted (source of truth) but
+        # won't be armed until a restart re-snapshots the live monitors — leave a per-write breadcrumb
+        # so an operator isn't left guessing why a just-saved monitor never fires.
+        logger.warning(
+            "hot-reload skipped: scheduler not running (degraded mode); monitor id=%s persisted but NOT armed until restart",
+            monitor.id,
+        )
+        return
+    try:
+        reschedule_monitor(scheduler, monitor)
+    except Exception:
+        logger.exception(
+            "hot-reload: failed to (re)schedule monitor id=%s; row persisted, will arm on next restart",
+            monitor.id,
+        )
+
 
 # Mirrors observing_pools._TICKER_RE: reject clearly-malformed tickers with 422 rather than storing them.
 _TICKER_RE = re.compile(r"^[A-Za-z0-9.\-]{1,16}$")
@@ -155,9 +187,13 @@ def list_monitors(db: Session = Depends(get_db), limit: int = Query(50, ge=1, le
 
 
 @router.post("/monitors")
-def create_monitor_endpoint(body: MonitorCreateRequest, db: Session = Depends(get_db)) -> dict:
+def create_monitor_endpoint(
+    body: MonitorCreateRequest,
+    db: Session = Depends(get_db),
+    scheduler=Depends(get_scheduler),
+) -> dict:
     """Create a monitor. 409 (not a silent upsert) if the name is taken — use PATCH to update.
-    Does NOT auto-register with the running scheduler (see the module HOT-RELOAD caveat)."""
+    Hot-registers the job on the live scheduler after a successful commit (Phase 9 / Issue #21)."""
     tickers = _validate_tickers(body.tickers)
     _validate_granularity(body.granularity)
     _validate_platform_keys(body.platform_keys)
@@ -179,13 +215,20 @@ def create_monitor_endpoint(body: MonitorCreateRequest, db: Session = Depends(ge
         db.rollback()
         raise HTTPException(status_code=409, detail=f"monitor '{body.name}' already exists; use PATCH to update")
     db.refresh(monitor)
+    _safe_reschedule(scheduler, monitor)
     return _monitor_to_dict(monitor)
 
 
 @router.patch("/monitors/{monitor_id}")
-def patch_monitor_endpoint(monitor_id: int, body: MonitorPatchRequest, db: Session = Depends(get_db)) -> dict:
+def patch_monitor_endpoint(
+    monitor_id: int,
+    body: MonitorPatchRequest,
+    db: Session = Depends(get_db),
+    scheduler=Depends(get_scheduler),
+) -> dict:
     """Partial update. Name is immutable here (avoids the unique-collision path). If schedule or
-    granularity changes, the resulting effective schedule is re-validated against the #18 floor."""
+    granularity changes, the resulting effective schedule is re-validated against the #18 floor.
+    Hot-updates the live scheduler job after a successful commit (Phase 9 / Issue #21)."""
     monitor = db.get(MonitorConfig, monitor_id)
     if monitor is None:
         raise HTTPException(status_code=404, detail=f"monitor {monitor_id} not found")
@@ -213,6 +256,7 @@ def patch_monitor_endpoint(monitor_id: int, body: MonitorPatchRequest, db: Sessi
     with _db_locked_to_503(db):
         db.commit()
     db.refresh(monitor)
+    _safe_reschedule(scheduler, monitor)
     return _monitor_to_dict(monitor)
 
 

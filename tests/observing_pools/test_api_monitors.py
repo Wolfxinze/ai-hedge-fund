@@ -1,11 +1,14 @@
-"""Phase 9: monitor CRUD + manual run, plus GET /opportunity-reports/{id}. Fully offline
-(StaticPool + injected analyzing_flow stub — no uv subprocess / LLM / network).
+"""Phase 9 + Phase 9 hot-reload (Issue #21): monitor CRUD + manual run, plus GET /opportunity-reports/{id}.
+Fully offline (StaticPool + injected analyzing_flow stub — no uv subprocess / LLM / network).
 
 These prove: create is 409-on-duplicate (never the silent upsert-clobber), PATCH is a true partial
 update (omitted fields untouched, explicit null clears a nullable col), a too-frequent schedule is
 rejected 422 (Issue #18), the manual run reaches only run_monitor -> serialize_report so every
 persisted report carries a disclaimer (research-only, never a trade), and a single failing ticker
 degrades rather than aborting the run.
+
+Hot-reload tests (Phase 9 / Issue #21) verify that POST/PATCH register/update/remove jobs on the
+live scheduler and that a scheduling failure never fails a successful DB write (best-effort contract).
 """
 
 import contextlib
@@ -26,6 +29,7 @@ from app.backend.routes.monitors import router as monitors_router
 from app.backend.routes.observing_pools import router as pools_router
 from src.integrations.tradingagents_adapter import AnalyzingFlowResult
 from src.monitoring.serialize import DisclaimerError
+from src.scheduler.scheduler import build_scheduler, monitor_job_id, start_scheduler, stop_scheduler
 from src.storage.models import MonitorConfig, OpportunityReport, ReportLabel
 
 _DESCRIPTIVE = {label.value for label in ReportLabel}
@@ -38,6 +42,11 @@ def _ok_flow(seen=None):
         return AnalyzingFlowResult(ticker, ReportLabel.THESIS_SUPPORTIVE, 70.0, False, f"{ticker} thesis intact", raw_decision="Buy")
 
     return flow
+
+
+def _raf_stub():
+    """Stub run_analysts_factory for build_scheduler in tests — no LLM/network."""
+    return lambda *a, **k: ({}, {})
 
 
 @pytest.fixture
@@ -68,6 +77,109 @@ def env():
             app.dependency_overrides[get_analyzing_flow] = lambda: flow
 
     return Env()
+
+
+@pytest.fixture
+def env_with_scheduler(monkeypatch):
+    """Like ``env`` but wires a NON-started BackgroundScheduler onto app.state.scheduler.
+    The scheduler is built with a CM session_factory bound to the SAME in-memory engine so
+    build_scheduler can query MonitorConfig rows. The scheduler is NOT started — config/job
+    assertions only; no real timer fires, no LLM, no network."""
+    monkeypatch.delenv("OBSERVING_POOL_REFRESH_CRON", raising=False)
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    m.Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    @contextlib.contextmanager
+    def cm_session_factory():
+        s = Session()
+        try:
+            yield s
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            s.close()
+
+    def override_get_db():
+        s = Session()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    scheduler = build_scheduler(session_factory=cm_session_factory, run_analysts_factory=_raf_stub)
+
+    app = FastAPI()
+    app.include_router(pools_router)
+    app.include_router(monitors_router)
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_analyzing_flow] = lambda: _ok_flow()
+    app.state.scheduler = scheduler
+
+    class Env:
+        client = TestClient(app)
+        SessionLocal = Session
+        sch = scheduler
+
+    return Env()
+
+
+@pytest.fixture
+def env_with_started_scheduler(monkeypatch):
+    """Like ``env_with_scheduler`` but the BackgroundScheduler is STARTED (a live job store).
+    PRODUCTION PARITY: routes always reschedule against a RUNNING scheduler, where two
+    ``add_job(replace_existing=True)`` correctly dedup to ONE job with the latest trigger. A
+    non-started scheduler instead uses ``_pending_jobs`` semantics that DIVERGE (two adds → two jobs,
+    ``get_job`` returns the stale first). Starting the scheduler is the only way these route tests
+    exercise the shipped wiring as it actually runs. Teardown GUARANTEES ``stop_scheduler`` so no
+    scheduler thread leaks across tests."""
+    monkeypatch.delenv("OBSERVING_POOL_REFRESH_CRON", raising=False)
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    m.Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    @contextlib.contextmanager
+    def cm_session_factory():
+        s = Session()
+        try:
+            yield s
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            s.close()
+
+    def override_get_db():
+        s = Session()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    scheduler = build_scheduler(session_factory=cm_session_factory, run_analysts_factory=_raf_stub)
+    start_scheduler(scheduler)  # live job store: production reschedules against a RUNNING scheduler
+
+    app = FastAPI()
+    app.include_router(pools_router)
+    app.include_router(monitors_router)
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_analyzing_flow] = lambda: _ok_flow()
+    app.state.scheduler = scheduler
+
+    class Env:
+        client = TestClient(app)
+        SessionLocal = Session
+        sch = scheduler
+
+    try:
+        yield Env()
+    finally:
+        stop_scheduler(scheduler)  # guaranteed: no scheduler thread leaks across tests
 
 
 # ── create / list ────────────────────────────────────────────────────────────
@@ -389,3 +501,145 @@ def test_create_returns_503_on_flush_locked(env, monkeypatch):
 
     monkeypatch.setattr(mon, "create_monitor", _raise_locked)  # locked on create's flush
     assert env.client.post("/monitors", json={"name": "x", "tickers": ["NVDA"]}).status_code == 503
+
+
+# ── hot-reload tests (Phase 9 / Issue #21) ──────────────────────────────────────────────────────
+# These prove: POST /monitors hot-registers the job; PATCH enabled=False removes it and
+# enabled=True re-adds it; a scheduling failure never fails a successful DB write (best-effort);
+# and app.state.scheduler=None is safe (no crash). Scheduler is NOT started — config assertions only.
+
+
+def test_post_monitor_hot_registers_job(env_with_scheduler):
+    """POST /monitors registers the new monitor's job on the live scheduler immediately.
+    WHY: monitors must arm on create without requiring a restart (Phase-9 guarantee)."""
+    r = env_with_scheduler.client.post("/monitors", json={"name": "hot_create", "tickers": ["NVDA"], "granularity": "weekly"})
+    assert r.status_code == 200
+    mid = r.json()["id"]
+    job = env_with_scheduler.sch.get_job(monitor_job_id(mid))
+    assert job is not None, "job must be registered after POST /monitors for an enabled monitor"
+
+
+def test_patch_disable_removes_job_then_enable_readds(env_with_scheduler):
+    """PATCH enabled=False removes the job; PATCH enabled=True re-adds it.
+    WHY: disabling a monitor must stop firing immediately (no restart needed); re-enabling must
+    re-arm immediately so the cadence resumes without operator intervention."""
+    r = env_with_scheduler.client.post("/monitors", json={"name": "toggle", "tickers": ["NVDA"]})
+    mid = r.json()["id"]
+
+    # Disable: job must disappear
+    env_with_scheduler.client.patch(f"/monitors/{mid}", json={"enabled": False})
+    assert env_with_scheduler.sch.get_job(monitor_job_id(mid)) is None, (
+        "disabled monitor must have no job on the live scheduler"
+    )
+
+    # Re-enable: job must re-appear
+    env_with_scheduler.client.patch(f"/monitors/{mid}", json={"enabled": True})
+    assert env_with_scheduler.sch.get_job(monitor_job_id(mid)) is not None, (
+        "re-enabled monitor must be re-registered on the live scheduler"
+    )
+
+
+def test_post_monitor_scheduling_failure_does_not_fail_write(env_with_scheduler, monkeypatch):
+    """If scheduler.add_job raises, POST still returns 200 and the monitor IS persisted.
+    WHY: the DB write is the source of truth; a scheduling side-effect failure is best-effort
+    (the next restart re-snapshots). A 500 on a successful write would be worse than a silent
+    scheduler miss (which is loud in logs via logger.exception)."""
+    # Patch add_job to always raise so _safe_reschedule triggers its exception path
+    original_add_job = env_with_scheduler.sch.add_job
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated scheduler failure")
+
+    monkeypatch.setattr(env_with_scheduler.sch, "add_job", boom)
+
+    r = env_with_scheduler.client.post("/monitors", json={"name": "boom_sched", "tickers": ["NVDA"]})
+    assert r.status_code == 200, "POST must return 200 even if scheduler.add_job raises"
+
+    # Row must be persisted (committed), not rolled back
+    with contextlib.closing(env_with_scheduler.SessionLocal()) as s:
+        row = s.query(MonitorConfig).filter_by(name="boom_sched").one_or_none()
+        assert row is not None, "monitor row must be persisted even when scheduling fails"
+
+
+def test_post_monitor_no_scheduler_returns_200(monkeypatch):
+    """POST /monitors returns 200 when app.state.scheduler is None (scheduler not running).
+    WHY: the scheduler is optional; the API must not crash when it failed to start."""
+    monkeypatch.delenv("OBSERVING_POOL_REFRESH_CRON", raising=False)
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    m.Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    def override_get_db():
+        s = Session()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app = FastAPI()
+    app.include_router(monitors_router)
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_analyzing_flow] = lambda: _ok_flow()
+    app.state.scheduler = None  # simulate scheduler start failure
+
+    client = TestClient(app)
+    r = client.post("/monitors", json={"name": "no_sch", "tickers": ["NVDA"]})
+    assert r.status_code == 200, "POST must return 200 even when app.state.scheduler is None"
+
+
+# ── started-scheduler route tests (Phase 9 / Issue #21) ──────────────────────────────────────────
+# These exercise the route→reschedule wiring against a RUNNING BackgroundScheduler (live job store),
+# matching production. On a non-started scheduler APScheduler's _pending_jobs semantics DIVERGE (two
+# add_jobs accumulate, get_job returns the stale first), so the non-started hot-reload tests above do
+# NOT validate the shipped behaviour under real conditions — these do.
+
+
+def test_post_monitor_registers_exactly_one_live_job(env_with_started_scheduler):
+    """POST /monitors yields EXACTLY ONE live job for the monitor on the running scheduler.
+    WHY: production arms monitors against a RUNNING scheduler; on a started job store an add must
+    produce exactly one job (no _pending_jobs duplication artefact)."""
+    mid = env_with_started_scheduler.client.post(
+        "/monitors", json={"name": "live_one", "tickers": ["NVDA"], "granularity": "weekly"}
+    ).json()["id"]
+    job_id = monitor_job_id(mid)
+    matching = [j for j in env_with_started_scheduler.sch.get_jobs() if j.id == job_id]
+    assert len(matching) == 1, "exactly one live job must exist for the monitor on a started scheduler"
+    assert env_with_started_scheduler.sch.get_job(job_id) is not None
+
+
+def test_patch_disable_then_enable_on_started_scheduler(env_with_started_scheduler):
+    """PATCH disable removes the live job; PATCH re-enable re-adds it (real before/after).
+    WHY: against a RUNNING scheduler — as in production — disabling must immediately remove the live
+    job and re-enabling must re-arm it, so the cadence stops/resumes without a restart."""
+    mid = env_with_started_scheduler.client.post(
+        "/monitors", json={"name": "live_toggle", "tickers": ["NVDA"]}
+    ).json()["id"]
+    job_id = monitor_job_id(mid)
+    assert env_with_started_scheduler.sch.get_job(job_id) is not None  # armed on create
+
+    env_with_started_scheduler.client.patch(f"/monitors/{mid}", json={"enabled": False})
+    assert env_with_started_scheduler.sch.get_job(job_id) is None, "disable must remove the live job"
+
+    env_with_started_scheduler.client.patch(f"/monitors/{mid}", json={"enabled": True})
+    assert env_with_started_scheduler.sch.get_job(job_id) is not None, "re-enable must re-add the live job"
+
+
+def test_patch_cadence_change_replaces_not_duplicates_live_job(env_with_started_scheduler):
+    """PATCH a still-enabled monitor's cadence → still EXACTLY ONE job, with the NEW trigger.
+    WHY: production reschedules against a RUNNING scheduler, where add_job(replace_existing=True)
+    must DEDUP to one job carrying the latest trigger — a non-started scheduler would instead
+    accumulate two jobs and return the stale trigger, the exact divergence this fixture guards."""
+    mid = env_with_started_scheduler.client.post(
+        "/monitors", json={"name": "live_cadence", "tickers": ["NVDA"], "granularity": "weekly"}
+    ).json()["id"]
+    job_id = monitor_job_id(mid)
+    trigger_before = str(env_with_started_scheduler.sch.get_job(job_id).trigger)
+
+    # weekly → monthly: both at/above the #18 floor, so the PATCH is accepted; their cron triggers differ.
+    env_with_started_scheduler.client.patch(f"/monitors/{mid}", json={"granularity": "monthly"})
+
+    matching = [j for j in env_with_started_scheduler.sch.get_jobs() if j.id == job_id]
+    assert len(matching) == 1, "a cadence change must REPLACE the job (no duplicate accumulation)"
+    trigger_after = str(env_with_started_scheduler.sch.get_job(job_id).trigger)
+    assert trigger_after != trigger_before, "the live trigger must reflect the NEW cadence after PATCH"

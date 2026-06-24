@@ -63,16 +63,20 @@ async def startup_event():
         logger.warning(f"Could not check Ollama status: {e}")
         logger.info("ℹ Ollama integration is available if you install it later")
 
-    # Phase 8: start the in-process observing-pools scheduler. A misconfigured
+    # Phase 8/9: start the in-process observing-pools scheduler. A misconfigured
     # OBSERVING_POOL_REFRESH_CRON raises here — caught + logged so the API still starts (just
     # without the scheduler), rather than failing the whole boot.
+    # app.state.scheduler is the route-facing handle (used by hot-reload in monitors.py);
+    # _scheduler is the module-global used for the shutdown event (both are set together).
     global _scheduler
     try:
         _scheduler = build_scheduler()
         start_scheduler(_scheduler)
+        app.state.scheduler = _scheduler
     except Exception:
         logger.exception("APScheduler failed to start; API continuing without it")
         _scheduler = None
+        app.state.scheduler = None
 
 
 @app.on_event("shutdown")
@@ -83,3 +87,4 @@ async def shutdown_event():
     if _scheduler is not None:
         stop_scheduler(_scheduler)
         _scheduler = None
+        app.state.scheduler = None
