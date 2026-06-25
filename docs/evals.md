@@ -99,10 +99,12 @@ stdlib `iterdump`, no subprocess) and the export CLI. *Known gap (follow-up):* t
 serenity GET projection (`GET /serenity/research/{ticker}`) still emits the
 disclaimer directly rather than through a `serialize_serenity` chokepoint; the DB
 CHECK already blocks a blank one at the DB layer. *Route-shadow reservation (#21):*
-a future write-result lookup-by-id must be registered as
-`GET /serenity/research/by-id/{id}` and declared **before** the `{ticker}` route —
-FastAPI matches in declaration order, so a bare `/serenity/research/{id}` would be
-shadowed by the existing `{ticker}` param route (literal-before-param convention).
+a future write-result lookup-by-id should be registered as
+`GET /serenity/research/by-id/{id}` — the literal `by-id` segment makes it a distinct
+**two-segment** path that the single-segment `{ticker}` route cannot match, so it
+resolves regardless of declaration order. A bare `/serenity/research/{id}` would instead
+collide with `{ticker}` on the same segment and require fragile ordering — which is why
+the `by-id` prefix is reserved.
 
 ## Counsel sign-off (release precondition)
 

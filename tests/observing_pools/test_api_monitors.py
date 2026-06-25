@@ -287,6 +287,16 @@ def test_patch_valid_analysts_succeeds(env):
     assert r.status_code == 200 and r.json()["selected_analysts"] == ids
 
 
+def test_create_mixed_valid_and_unknown_analysts_is_422(env):
+    """One bad id among valid ones still 422s, and the detail names ONLY the unknown id (not the valid
+    ones) — so the error points the caller at the actual typo, not the whole list."""
+    valid = _valid_analyst_ids()
+    r = env.client.post("/monitors", json={"name": "a7", "tickers": ["NVDA"], "selected_analysts": [*valid, "bogus_id"]})
+    assert r.status_code == 422
+    detail = str(r.json()["detail"])
+    assert "bogus_id" in detail and not any(v in detail for v in valid)  # only the typo is surfaced
+
+
 # ── patch ──────────────────────────────────────────────────────────────────────
 
 
@@ -415,6 +425,38 @@ def test_run_releases_permit_on_error_path(env, monkeypatch):
     monkeypatch.undo()  # restore run_monitor so the follow-up run can succeed
     # permit released by `finally`: a subsequent normal run succeeds (would 429 if the permit leaked)
     assert env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"}).status_code == 200
+
+
+def test_run_releases_permit_on_404(env):
+    """A 404 (unknown monitor) is raised INSIDE the try, so `finally` must still reclaim the permit —
+    guards against a future refactor that acquires then raises the lookup-guard BEFORE the try, which
+    would leak a permit on every bad id and silently wedge the cap."""
+    from app.backend.routes import monitors as monitors_mod
+
+    assert env.client.post("/monitors/9999/run").status_code == 404
+    acquired = [monitors_mod._run_semaphore.acquire(blocking=False) for _ in range(monitors_mod._MAX_CONCURRENT_RUNS)]
+    try:
+        assert all(acquired), "every permit must be reclaimable after a 404 run (no leak)"
+    finally:
+        for ok in acquired:
+            if ok:
+                monitors_mod._run_semaphore.release()
+
+
+def test_run_releases_permit_on_422(env):
+    """A 422 (bad trade_date) is raised INSIDE the try after the permit is acquired, so `finally` must
+    reclaim it — the same acquire-then-raise-before-try refactor risk as the 404 path."""
+    from app.backend.routes import monitors as monitors_mod
+
+    mid = env.client.post("/monitors", json={"name": "permit422", "tickers": ["NVDA"]}).json()["id"]
+    assert env.client.post(f"/monitors/{mid}/run", json={"trade_date": "not-a-date"}).status_code == 422
+    acquired = [monitors_mod._run_semaphore.acquire(blocking=False) for _ in range(monitors_mod._MAX_CONCURRENT_RUNS)]
+    try:
+        assert all(acquired), "every permit must be reclaimable after a 422 run (no leak)"
+    finally:
+        for ok in acquired:
+            if ok:
+                monitors_mod._run_semaphore.release()
 
 
 def test_get_opportunity_report_by_id(env):
