@@ -15,6 +15,7 @@ registered/updated/removed immediately after each successful DB write via ``_saf
 
 import logging
 import re
+import threading
 from contextlib import contextmanager
 from datetime import date, datetime
 
@@ -72,6 +73,11 @@ _GRANULARITIES = {g.value for g in Granularity}
 # Upper-bound a watchlist so POST /monitors/{id}/run can't be coerced into a synchronous
 # thousands-of-tickers job (each ticker is a multi-minute analyzing-flow call).
 _MAX_TICKERS = 100
+# Cap concurrent manual runs: each run is a synchronous multi-minute analyzing-flow job, so the
+# loopback surface must not be coerced into N parallel storms. cap=2 is lenient — never 429s the
+# legitimate single-user case. A BoundedSemaphore raises if released more than acquired (a leak alarm).
+_MAX_CONCURRENT_RUNS = 2
+_run_semaphore = threading.BoundedSemaphore(_MAX_CONCURRENT_RUNS)
 
 
 class MonitorCreateRequest(BaseModel):
@@ -283,14 +289,21 @@ def run_monitor_endpoint(
 ) -> dict:
     """Run a monitor once NOW (synchronous). Reaches only run_monitor → serialize_report, so every
     persisted report carries the disclaimer; a single ticker's failure degrades, never aborts."""
-    monitor = db.get(MonitorConfig, monitor_id)
-    if monitor is None:
-        raise HTTPException(status_code=404, detail=f"monitor {monitor_id} not found")
-    trade_date = (body.trade_date if body and body.trade_date else None) or date.today().isoformat()
-    _validate_trade_date(trade_date)
-    # run_monitor flush()es per report (BEFORE the commit), so guard the whole run: a locked DB on a
-    # mid-run flush maps to 503, not an opaque 500.
-    with _db_locked_to_503(db):
-        result = run_monitor(db, monitor, trade_date=trade_date, analyzing_flow=analyzing_flow)
-        db.commit()  # run_monitor only flush()es per report; the route owns the commit
-    return {"monitor_name": result.monitor_name, "reports": result.reports, "degraded_count": result.degraded_count, "any_degraded": result.any_degraded}
+    # Acquire a run permit BEFORE the try whose finally releases — a BoundedSemaphore raises if you
+    # release a permit you never took. At the cap, fail fast with a retryable 429 (no queueing).
+    if not _run_semaphore.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="too many concurrent monitor runs; retry shortly")
+    try:
+        monitor = db.get(MonitorConfig, monitor_id)
+        if monitor is None:
+            raise HTTPException(status_code=404, detail=f"monitor {monitor_id} not found")
+        trade_date = (body.trade_date if body and body.trade_date else None) or date.today().isoformat()
+        _validate_trade_date(trade_date)
+        # run_monitor flush()es per report (BEFORE the commit), so guard the whole run: a locked DB on a
+        # mid-run flush maps to 503, not an opaque 500.
+        with _db_locked_to_503(db):
+            result = run_monitor(db, monitor, trade_date=trade_date, analyzing_flow=analyzing_flow)
+            db.commit()  # run_monitor only flush()es per report; the route owns the commit
+        return {"monitor_name": result.monitor_name, "reports": result.reports, "degraded_count": result.degraded_count, "any_degraded": result.any_degraded}
+    finally:
+        _run_semaphore.release()  # released on EVERY exit path (success, 404/422/503, or uncaught error)

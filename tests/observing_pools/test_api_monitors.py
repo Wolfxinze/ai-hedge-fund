@@ -182,6 +182,21 @@ def env_with_started_scheduler(monkeypatch):
         stop_scheduler(scheduler)  # guaranteed: no scheduler thread leaks across tests
 
 
+@pytest.fixture(autouse=True)
+def _reset_run_semaphore():
+    """The run semaphore is a MODULE GLOBAL — a test that acquires it (e.g. the 429 path) could
+    poison siblings if it leaked a permit. After each test, drain any stray permits then refill to
+    exactly _MAX_CONCURRENT_RUNS, so the global is left fully available no matter what."""
+    yield
+    from app.backend.routes import monitors as monitors_mod
+
+    while True:  # drain to empty (non-blocking)
+        if not monitors_mod._run_semaphore.acquire(blocking=False):
+            break
+    for _ in range(monitors_mod._MAX_CONCURRENT_RUNS):  # refill to full
+        monitors_mod._run_semaphore.release()
+
+
 # ── create / list ────────────────────────────────────────────────────────────
 
 
@@ -345,6 +360,61 @@ def test_run_invalid_trade_date_422(env):
 
 def test_run_unknown_monitor_404(env):
     assert env.client.post("/monitors/9999/run").status_code == 404
+
+
+# ── concurrency semaphore + 429 (Issue #21) ──────────────────────────────────
+# Manual runs are synchronous multi-minute jobs; cap concurrent runs with a bounded semaphore so the
+# loopback surface can't be coerced into N parallel analyzing-flow storms. cap=2 is lenient (a single
+# user is never throttled). The permit MUST be released on every exit path (success AND error).
+
+
+def test_run_returns_429_when_at_concurrency_cap(env):
+    """Exhaust the module-global semaphore deterministically (no thread race), then a run is 429."""
+    from app.backend.routes import monitors as monitors_mod
+
+    mid = env.client.post("/monitors", json={"name": "capped", "tickers": ["NVDA"]}).json()["id"]
+    monitors_mod._run_semaphore.acquire()
+    monitors_mod._run_semaphore.acquire()  # cap=2 → both permits taken
+    try:
+        r = env.client.post(f"/monitors/{mid}/run", json={})
+        assert r.status_code == 429
+        assert "concurrent" in r.json()["detail"].lower()
+    finally:
+        monitors_mod._run_semaphore.release()
+        monitors_mod._run_semaphore.release()
+
+
+def test_run_releases_permit_after_success(env):
+    """A normal run does not leak a permit: after it returns, the semaphore is fully available again."""
+    from app.backend.routes import monitors as monitors_mod
+
+    mid = env.client.post("/monitors", json={"name": "leakcheck", "tickers": ["NVDA"]}).json()["id"]
+    assert env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"}).status_code == 200
+    # all permits reclaimable → none leaked
+    acquired = [monitors_mod._run_semaphore.acquire(blocking=False) for _ in range(monitors_mod._MAX_CONCURRENT_RUNS)]
+    try:
+        assert all(acquired), "every permit must be available after a successful run (no leak)"
+    finally:
+        for ok in acquired:
+            if ok:
+                monitors_mod._run_semaphore.release()
+
+
+def test_run_releases_permit_on_error_path(env, monkeypatch):
+    """If run_monitor raises, the error propagates (uncaught → TestClient re-raises) AND the permit is
+    released in `finally` — proving an exception cannot strand a permit and wedge the cap permanently."""
+    import app.backend.routes.monitors as monitors_mod
+
+    def boom(*_a, **_k):
+        raise RuntimeError("flow exploded mid-run")
+
+    mid = env.client.post("/monitors", json={"name": "errpath", "tickers": ["NVDA"]}).json()["id"]
+    monkeypatch.setattr(monitors_mod, "run_monitor", boom)
+    with pytest.raises(RuntimeError, match="flow exploded mid-run"):  # propagated, not swallowed
+        env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"})
+    monkeypatch.undo()  # restore run_monitor so the follow-up run can succeed
+    # permit released by `finally`: a subsequent normal run succeeds (would 429 if the permit leaked)
+    assert env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"}).status_code == 200
 
 
 def test_get_opportunity_report_by_id(env):
