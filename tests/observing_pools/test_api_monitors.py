@@ -227,6 +227,51 @@ def test_create_too_frequent_schedule_message(env):
     assert "MONITOR_MIN_INTERVAL_SECONDS" in str(r.json()["detail"])
 
 
+# ── selected_analysts allowlist (Issue #21) ───────────────────────────────────
+# Reject unknown analyst ids against ANALYST_CONFIG at the create/patch boundary (422), instead of
+# silently storing a typo'd id that no run can ever resolve. None/empty/omitted carry no constraint.
+
+
+def _valid_analyst_ids() -> list[str]:
+    """Two real ids from the live ANALYST_CONFIG (so the test tracks the registry, not a hardcoded list)."""
+    from src.utils.analysts import ANALYST_CONFIG
+
+    return sorted(ANALYST_CONFIG)[:2]
+
+
+def test_create_unknown_analyst_is_422(env):
+    r = env.client.post("/monitors", json={"name": "a1", "tickers": ["NVDA"], "selected_analysts": ["not_a_real_analyst"]})
+    assert r.status_code == 422
+    assert "not_a_real_analyst" in str(r.json()["detail"])  # the offending id is surfaced
+
+
+def test_create_valid_analysts_succeeds(env):
+    ids = _valid_analyst_ids()
+    r = env.client.post("/monitors", json={"name": "a2", "tickers": ["NVDA"], "selected_analysts": ids})
+    assert r.status_code == 200
+    assert r.json()["selected_analysts"] == ids
+
+
+def test_create_none_analysts_succeeds(env):
+    # explicit null and omitted both carry no constraint
+    assert env.client.post("/monitors", json={"name": "a3", "tickers": ["NVDA"], "selected_analysts": None}).status_code == 200
+    assert env.client.post("/monitors", json={"name": "a4", "tickers": ["NVDA"]}).status_code == 200
+
+
+def test_patch_unknown_analyst_is_422(env):
+    mid = env.client.post("/monitors", json={"name": "a5", "tickers": ["NVDA"]}).json()["id"]
+    r = env.client.patch(f"/monitors/{mid}", json={"selected_analysts": ["nope_not_real"]})
+    assert r.status_code == 422
+    assert "nope_not_real" in str(r.json()["detail"])
+
+
+def test_patch_valid_analysts_succeeds(env):
+    ids = _valid_analyst_ids()
+    mid = env.client.post("/monitors", json={"name": "a6", "tickers": ["NVDA"]}).json()["id"]
+    r = env.client.patch(f"/monitors/{mid}", json={"selected_analysts": ids})
+    assert r.status_code == 200 and r.json()["selected_analysts"] == ids
+
+
 # ── patch ──────────────────────────────────────────────────────────────────────
 
 

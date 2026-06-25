@@ -142,6 +142,17 @@ def _validate_platform_keys(platform_keys: list[str] | None) -> None:
             raise HTTPException(status_code=422, detail=f"unknown platform '{key}'")
 
 
+def _validate_selected_analysts(selected_analysts: list[str] | None) -> None:
+    """Reject unknown analyst ids (422). Lazy-import keeps the routes module offline-importable."""
+    if not selected_analysts:
+        return  # None/empty/omitted → no constraint
+    from src.utils.analysts import ANALYST_CONFIG  # lazy import INSIDE the fn (keep module offline-importable)
+
+    unknown = [a for a in selected_analysts if a not in ANALYST_CONFIG]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"unknown analyst(s): {sorted(set(unknown))}")
+
+
 def _validate_schedule(effective_schedule: str) -> None:
     """Reject a schedule below the #18 minimum-interval floor (422), or a malformed/unknown one (422).
     ``effective_schedule`` is the explicit cron if set, else the granularity keyword (matches
@@ -197,6 +208,7 @@ def create_monitor_endpoint(
     tickers = _validate_tickers(body.tickers)
     _validate_granularity(body.granularity)
     _validate_platform_keys(body.platform_keys)
+    _validate_selected_analysts(body.selected_analysts)
     _validate_schedule(body.schedule or body.granularity)  # #18 floor on the effective schedule
     if db.query(MonitorConfig).filter_by(name=body.name).first() is not None:
         raise HTTPException(status_code=409, detail=f"monitor '{body.name}' already exists; use PATCH to update")
@@ -245,6 +257,8 @@ def patch_monitor_endpoint(
         _validate_granularity(fields["granularity"])
     if "platform_keys" in fields:
         _validate_platform_keys(fields["platform_keys"])
+    if "selected_analysts" in fields:
+        _validate_selected_analysts(fields["selected_analysts"])
     # Re-validate the effective schedule against the #18 floor when it could change OR when the monitor
     # is being (re-)enabled — so a pre-floor sub-floor row (created via direct DB/CLI) can't be re-armed
     # through the API and then picked up by the scheduler.
