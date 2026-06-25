@@ -126,6 +126,26 @@ def test_aggregate_no_signals_is_insufficient_evidence_and_degraded():
     assert res.agent_reports == {}
 
 
+def test_aggregate_all_signals_degraded_preserves_agent_reports():
+    # Distinct from the no-signals case: signals ARE present but every one is unusable.
+    # No valid score → INSUFFICIENT_EVIDENCE/degraded, but the per-analyst audit trail
+    # (why each was dropped) must survive in agent_reports — operators need it.
+    committee = ["warren_buffett", "cathie_wood"]
+    sig = _signals(
+        "NVDA",
+        {
+            "warren_buffett": {"signal": "garbage", "confidence": 80},
+            "cathie_wood": {"signal": None, "confidence": 70},
+        },
+    )
+    res = _aggregate("NVDA", committee, sig)
+    assert res.label == ReportLabel.INSUFFICIENT_EVIDENCE
+    assert res.degraded is True
+    assert res.confidence == 0.0
+    assert set(res.agent_reports) == {"warren_buffett", "cathie_wood"}  # populated, not dropped
+    assert all(r["degraded"] is True for r in res.agent_reports.values())
+
+
 def test_aggregate_partial_degradation_keeps_band_and_excludes_bad_analyst():
     committee = ["warren_buffett", "cathie_wood"]
     sig = _signals(
@@ -172,6 +192,7 @@ def test_factory_empty_list_runs_full_committee():
     flow = make_committee_analyzing_flow([], run_analysts=stub)
     flow("NVDA", "2026-06-12")
     assert stub.calls[0][1] == committee  # [] mirrors None → full committee (pipeline.py parity)
+    assert len(stub.calls[0][1]) == 16  # literal anchor: not just self-referential to committee_analyst_keys()
 
 
 def test_factory_custom_list_is_load_bearing():
