@@ -4,8 +4,9 @@
     python -m src.monitoring run --name "AI weekly" --date 2026-06-12
     python -m src.monitoring list
 
-``run`` invokes TradingAgents' debate graph (needs the TradingAgents env + LLM
-keys); on any failure it emits a degraded, disclaimer-carrying report.
+``run`` invokes the ai-hedge-fund analyst committee built from the monitor's
+selected_analysts (needs LLM keys); on any failure it emits a degraded,
+disclaimer-carrying report.
 """
 
 import argparse

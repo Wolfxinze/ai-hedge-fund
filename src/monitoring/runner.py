@@ -1,9 +1,10 @@
 """Monitor execution (PRD v4 §9.7, Phase 8 manual-run subset).
 
-Runs a monitor's watchlist through the analyzing flow (TradingAgents adapter by
-default; injectable for tests), stamping every output with the disclaimer and
-persisting it. No scheduler yet (manual run); APScheduler is an expansion phase.
-Emits research reports, never orders.
+Runs a monitor's watchlist through the analyzing flow (the ai-hedge-fund committee
+built from ``monitor.selected_analysts`` by default; injectable for tests and for the
+TradingAgents adapter), stamping every output with the disclaimer and persisting it.
+No scheduler yet (manual run); APScheduler is an expansion phase. Emits research
+reports, never orders.
 """
 
 import logging
@@ -13,7 +14,7 @@ from typing import Protocol
 from sqlalchemy.orm import Session
 
 from src.compliance import research_disclaimer
-from src.integrations.tradingagents_adapter import AnalyzingFlowResult, run_analyzing_flow
+from src.integrations.tradingagents_adapter import AnalyzingFlowResult
 from src.monitoring.serialize import serialize_report
 from src.storage.models import Granularity, MonitorConfig, OpportunityReport, ReportLabel
 
@@ -65,16 +66,27 @@ def run_monitor(
     monitor: MonitorConfig,
     *,
     trade_date: str,
-    analyzing_flow: AnalyzingFlow = run_analyzing_flow,
+    analyzing_flow: AnalyzingFlow | None = None,
 ) -> MonitorRunResult:
-    """Run the monitor once; persist one disclaimer-carrying report per ticker."""
+    """Run the monitor once; persist one disclaimer-carrying report per ticker.
+
+    With no ``analyzing_flow`` injected, the default engine is the ai-hedge-fund
+    committee built from ``monitor.selected_analysts`` (None/[] → full committee).
+    """
+    flow = analyzing_flow
+    if flow is None:
+        # Lazy: the committee flow pulls the scoring graph / agent stack.
+        from src.monitoring.committee_flow import make_committee_analyzing_flow
+
+        flow = make_committee_analyzing_flow(monitor.selected_analysts)
+
     disclaimer, disclaimer_version = research_disclaimer()
     serialized: list[dict] = []
     degraded_count = 0
 
     for ticker in monitor.tickers or []:
         try:
-            result = analyzing_flow(ticker, trade_date)
+            result = flow(ticker, trade_date)
         except Exception as exc:  # one ticker's failure must not abort the whole monitor run
             logger.warning("monitor %s: analyzing flow raised for %s: %s", monitor.name, ticker, exc)
             result = AnalyzingFlowResult(
