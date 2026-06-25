@@ -208,6 +208,13 @@ def get_pool(platform_key: str, db: Session = Depends(get_db)) -> dict:
     return {"platform_key": platform_key, "count": len(ranked), "entries": [_entry_to_dict(e) for e in ranked]}
 
 
+# ROUTE-SHADOW (Issue #21): a future write-result lookup-by-id should be registered as
+# `/serenity/research/by-id/{id}`. The literal `by-id` segment makes it a DISTINCT two-segment path that
+# the single-segment `{ticker}` route cannot match, so it resolves correctly regardless of declaration
+# order. Do NOT instead add a bare `/serenity/research/{id}`: that collides with `{ticker}` on the SAME
+# segment (every `/serenity/research/<x>` matches both), forcing a fragile declaration-order dependency
+# — exactly the trap the `by-id` prefix avoids. (That same-segment, order-dependent case does exist in
+# this module: `/observing-pools/refresh`[-runs] is declared before `/observing-pools/{platform_key}`.)
 @router.get("/serenity/research/{ticker}")
 def get_serenity(ticker: str, db: Session = Depends(get_db), limit: int = Query(50, ge=1, le=200)) -> list[dict]:
     if not _TICKER_RE.match(ticker):

@@ -182,6 +182,21 @@ def env_with_started_scheduler(monkeypatch):
         stop_scheduler(scheduler)  # guaranteed: no scheduler thread leaks across tests
 
 
+@pytest.fixture(autouse=True)
+def _reset_run_semaphore():
+    """The run semaphore is a MODULE GLOBAL — a test that acquires it (e.g. the 429 path) could
+    poison siblings if it leaked a permit. After each test, drain any stray permits then refill to
+    exactly _MAX_CONCURRENT_RUNS, so the global is left fully available no matter what."""
+    yield
+    from app.backend.routes import monitors as monitors_mod
+
+    while True:  # drain to empty (non-blocking)
+        if not monitors_mod._run_semaphore.acquire(blocking=False):
+            break
+    for _ in range(monitors_mod._MAX_CONCURRENT_RUNS):  # refill to full
+        monitors_mod._run_semaphore.release()
+
+
 # ── create / list ────────────────────────────────────────────────────────────
 
 
@@ -225,6 +240,61 @@ def test_create_too_frequent_schedule_message(env):
     r = env.client.post("/monitors", json={"name": "spammy", "tickers": ["NVDA"], "schedule": "*/2 * * * *"})
     assert r.status_code == 422
     assert "MONITOR_MIN_INTERVAL_SECONDS" in str(r.json()["detail"])
+
+
+# ── selected_analysts allowlist (Issue #21) ───────────────────────────────────
+# Reject unknown analyst ids against ANALYST_CONFIG at the create/patch boundary (422), instead of
+# silently storing a typo'd id that no run can ever resolve. None/empty/omitted carry no constraint.
+
+
+def _valid_analyst_ids() -> list[str]:
+    """Two real ids from the live ANALYST_CONFIG (so the test tracks the registry, not a hardcoded list)."""
+    from src.utils.analysts import ANALYST_CONFIG
+
+    return sorted(ANALYST_CONFIG)[:2]
+
+
+def test_create_unknown_analyst_is_422(env):
+    r = env.client.post("/monitors", json={"name": "a1", "tickers": ["NVDA"], "selected_analysts": ["not_a_real_analyst"]})
+    assert r.status_code == 422
+    assert "not_a_real_analyst" in str(r.json()["detail"])  # the offending id is surfaced
+
+
+def test_create_valid_analysts_succeeds(env):
+    ids = _valid_analyst_ids()
+    r = env.client.post("/monitors", json={"name": "a2", "tickers": ["NVDA"], "selected_analysts": ids})
+    assert r.status_code == 200
+    assert r.json()["selected_analysts"] == ids
+
+
+def test_create_none_analysts_succeeds(env):
+    # explicit null and omitted both carry no constraint
+    assert env.client.post("/monitors", json={"name": "a3", "tickers": ["NVDA"], "selected_analysts": None}).status_code == 200
+    assert env.client.post("/monitors", json={"name": "a4", "tickers": ["NVDA"]}).status_code == 200
+
+
+def test_patch_unknown_analyst_is_422(env):
+    mid = env.client.post("/monitors", json={"name": "a5", "tickers": ["NVDA"]}).json()["id"]
+    r = env.client.patch(f"/monitors/{mid}", json={"selected_analysts": ["nope_not_real"]})
+    assert r.status_code == 422
+    assert "nope_not_real" in str(r.json()["detail"])
+
+
+def test_patch_valid_analysts_succeeds(env):
+    ids = _valid_analyst_ids()
+    mid = env.client.post("/monitors", json={"name": "a6", "tickers": ["NVDA"]}).json()["id"]
+    r = env.client.patch(f"/monitors/{mid}", json={"selected_analysts": ids})
+    assert r.status_code == 200 and r.json()["selected_analysts"] == ids
+
+
+def test_create_mixed_valid_and_unknown_analysts_is_422(env):
+    """One bad id among valid ones still 422s, and the detail names ONLY the unknown id (not the valid
+    ones) — so the error points the caller at the actual typo, not the whole list."""
+    valid = _valid_analyst_ids()
+    r = env.client.post("/monitors", json={"name": "a7", "tickers": ["NVDA"], "selected_analysts": [*valid, "bogus_id"]})
+    assert r.status_code == 422
+    detail = str(r.json()["detail"])
+    assert "bogus_id" in detail and not any(v in detail for v in valid)  # only the typo is surfaced
 
 
 # ── patch ──────────────────────────────────────────────────────────────────────
@@ -300,6 +370,93 @@ def test_run_invalid_trade_date_422(env):
 
 def test_run_unknown_monitor_404(env):
     assert env.client.post("/monitors/9999/run").status_code == 404
+
+
+# ── concurrency semaphore + 429 (Issue #21) ──────────────────────────────────
+# Manual runs are synchronous multi-minute jobs; cap concurrent runs with a bounded semaphore so the
+# loopback surface can't be coerced into N parallel analyzing-flow storms. cap=2 is lenient (a single
+# user is never throttled). The permit MUST be released on every exit path (success AND error).
+
+
+def test_run_returns_429_when_at_concurrency_cap(env):
+    """Exhaust the module-global semaphore deterministically (no thread race), then a run is 429."""
+    from app.backend.routes import monitors as monitors_mod
+
+    mid = env.client.post("/monitors", json={"name": "capped", "tickers": ["NVDA"]}).json()["id"]
+    monitors_mod._run_semaphore.acquire()
+    monitors_mod._run_semaphore.acquire()  # cap=2 → both permits taken
+    try:
+        r = env.client.post(f"/monitors/{mid}/run", json={})
+        assert r.status_code == 429
+        assert "concurrent" in r.json()["detail"].lower()
+    finally:
+        monitors_mod._run_semaphore.release()
+        monitors_mod._run_semaphore.release()
+
+
+def test_run_releases_permit_after_success(env):
+    """A normal run does not leak a permit: after it returns, the semaphore is fully available again."""
+    from app.backend.routes import monitors as monitors_mod
+
+    mid = env.client.post("/monitors", json={"name": "leakcheck", "tickers": ["NVDA"]}).json()["id"]
+    assert env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"}).status_code == 200
+    # all permits reclaimable → none leaked
+    acquired = [monitors_mod._run_semaphore.acquire(blocking=False) for _ in range(monitors_mod._MAX_CONCURRENT_RUNS)]
+    try:
+        assert all(acquired), "every permit must be available after a successful run (no leak)"
+    finally:
+        for ok in acquired:
+            if ok:
+                monitors_mod._run_semaphore.release()
+
+
+def test_run_releases_permit_on_error_path(env, monkeypatch):
+    """If run_monitor raises, the error propagates (uncaught → TestClient re-raises) AND the permit is
+    released in `finally` — proving an exception cannot strand a permit and wedge the cap permanently."""
+    import app.backend.routes.monitors as monitors_mod
+
+    def boom(*_a, **_k):
+        raise RuntimeError("flow exploded mid-run")
+
+    mid = env.client.post("/monitors", json={"name": "errpath", "tickers": ["NVDA"]}).json()["id"]
+    monkeypatch.setattr(monitors_mod, "run_monitor", boom)
+    with pytest.raises(RuntimeError, match="flow exploded mid-run"):  # propagated, not swallowed
+        env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"})
+    monkeypatch.undo()  # restore run_monitor so the follow-up run can succeed
+    # permit released by `finally`: a subsequent normal run succeeds (would 429 if the permit leaked)
+    assert env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"}).status_code == 200
+
+
+def test_run_releases_permit_on_404(env):
+    """A 404 (unknown monitor) is raised INSIDE the try, so `finally` must still reclaim the permit —
+    guards against a future refactor that acquires then raises the lookup-guard BEFORE the try, which
+    would leak a permit on every bad id and silently wedge the cap."""
+    from app.backend.routes import monitors as monitors_mod
+
+    assert env.client.post("/monitors/9999/run").status_code == 404
+    acquired = [monitors_mod._run_semaphore.acquire(blocking=False) for _ in range(monitors_mod._MAX_CONCURRENT_RUNS)]
+    try:
+        assert all(acquired), "every permit must be reclaimable after a 404 run (no leak)"
+    finally:
+        for ok in acquired:
+            if ok:
+                monitors_mod._run_semaphore.release()
+
+
+def test_run_releases_permit_on_422(env):
+    """A 422 (bad trade_date) is raised INSIDE the try after the permit is acquired, so `finally` must
+    reclaim it — the same acquire-then-raise-before-try refactor risk as the 404 path."""
+    from app.backend.routes import monitors as monitors_mod
+
+    mid = env.client.post("/monitors", json={"name": "permit422", "tickers": ["NVDA"]}).json()["id"]
+    assert env.client.post(f"/monitors/{mid}/run", json={"trade_date": "not-a-date"}).status_code == 422
+    acquired = [monitors_mod._run_semaphore.acquire(blocking=False) for _ in range(monitors_mod._MAX_CONCURRENT_RUNS)]
+    try:
+        assert all(acquired), "every permit must be reclaimable after a 422 run (no leak)"
+    finally:
+        for ok in acquired:
+            if ok:
+                monitors_mod._run_semaphore.release()
 
 
 def test_get_opportunity_report_by_id(env):

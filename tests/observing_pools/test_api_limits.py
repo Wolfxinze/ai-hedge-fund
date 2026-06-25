@@ -49,3 +49,13 @@ def test_serenity_rejects_malformed_ticker():
     c = _client()
     assert c.get("/serenity/research/TOOOOOOOOOOOOOOOOLONG").status_code == 422  # >16 chars
     assert c.get("/serenity/research/NVDA").status_code == 200  # valid → empty list
+
+
+def test_serenity_research_by_ticker_still_resolves():
+    """Route-shadow guard (#21): GET /serenity/research/{ticker} resolves to the ticker handler
+    (200 + a list). If a future `/serenity/research/{id}` int route is added BEFORE this one it would
+    shadow `{ticker}` and this would break — pin the contract so that regression is caught."""
+    c = _client()
+    r = c.get("/serenity/research/NVDA")
+    assert r.status_code == 200
+    assert isinstance(r.json(), list)  # the ticker projection returns a list, never a single object
