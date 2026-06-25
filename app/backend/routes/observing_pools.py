@@ -208,6 +208,12 @@ def get_pool(platform_key: str, db: Session = Depends(get_db)) -> dict:
     return {"platform_key": platform_key, "count": len(ranked), "entries": [_entry_to_dict(e) for e in ranked]}
 
 
+# ROUTE-SHADOW (Issue #21): a future write-result lookup-by-id MUST be registered as
+# `/serenity/research/by-id/{id}` and declared BEFORE this `{ticker}` route. FastAPI matches in
+# declaration order (first-match-wins), so a bare `/serenity/research/{id}` would be shadowed by this
+# `{ticker}` single-path-param route (every `/serenity/research/<x>` would resolve here first). Pin the
+# literal segment `by-id` ahead of the param — the same literal-before-param convention this module
+# already follows (`/observing-pools/refresh`[-runs] declared before `/observing-pools/{platform_key}`).
 @router.get("/serenity/research/{ticker}")
 def get_serenity(ticker: str, db: Session = Depends(get_db), limit: int = Query(50, ge=1, le=200)) -> list[dict]:
     if not _TICKER_RE.match(ticker):

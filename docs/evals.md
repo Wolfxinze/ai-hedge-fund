@@ -98,7 +98,11 @@ The disclaimer suite verifies both layers plus a sqlite3 `.dump` round-trip (via
 stdlib `iterdump`, no subprocess) and the export CLI. *Known gap (follow-up):* the
 serenity GET projection (`GET /serenity/research/{ticker}`) still emits the
 disclaimer directly rather than through a `serialize_serenity` chokepoint; the DB
-CHECK already blocks a blank one at the DB layer.
+CHECK already blocks a blank one at the DB layer. *Route-shadow reservation (#21):*
+a future write-result lookup-by-id must be registered as
+`GET /serenity/research/by-id/{id}` and declared **before** the `{ticker}` route —
+FastAPI matches in declaration order, so a bare `/serenity/research/{id}` would be
+shadowed by the existing `{ticker}` param route (literal-before-param convention).
 
 ## Counsel sign-off (release precondition)
 
