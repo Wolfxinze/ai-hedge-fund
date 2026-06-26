@@ -26,7 +26,6 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.backend.database.connection import get_db
-from src.integrations.tradingagents_adapter import run_analyzing_flow
 from src.monitoring.runner import AnalyzingFlow, create_monitor, run_monitor
 from src.observing_pools.platforms import PLATFORM_KEYS
 from src.scheduler.cron_map import resolve_trigger_checked, ScheduleTooFrequentError
@@ -105,10 +104,11 @@ class MonitorRunRequest(BaseModel):
     trade_date: str | None = None  # YYYY-MM-DD; default today (aligns with the scheduler's _today())
 
 
-def get_analyzing_flow() -> AnalyzingFlow:
-    """The production analyzing flow (TradingAgents adapter). Overridden in tests with a stub so a
-    run never spawns the real uv subprocess / LLM."""
-    return run_analyzing_flow
+def get_analyzing_flow() -> AnalyzingFlow | None:
+    """Default flow sentinel: ``None`` → run_monitor builds the ai-hedge-fund committee
+    from the monitor's selected_analysts (#51). Overridden in tests with a stub flow so a
+    run never spawns the real LLM committee."""
+    return None
 
 
 def _monitor_to_dict(monitor: MonitorConfig) -> dict:
@@ -285,7 +285,7 @@ def run_monitor_endpoint(
     monitor_id: int,
     body: MonitorRunRequest | None = None,
     db: Session = Depends(get_db),
-    analyzing_flow: AnalyzingFlow = Depends(get_analyzing_flow),
+    analyzing_flow: AnalyzingFlow | None = Depends(get_analyzing_flow),
 ) -> dict:
     """Run a monitor once NOW (synchronous). Reaches only run_monitor → serialize_report, so every
     persisted report carries the disclaimer; a single ticker's failure degrades, never aborts."""
