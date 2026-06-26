@@ -164,6 +164,23 @@ def test_aggregate_partial_degradation_keeps_band_and_excludes_bad_analyst():
     assert res.agent_reports["cathie_wood"]["signal"] == "neutral"  # never a fabricated directional signal
 
 
+def test_aggregate_clamps_out_of_range_confidence_into_report():
+    # A valid signal with an out-of-range confidence passes _safe_agent_score (signal_to_score
+    # raises only on a bad signal, not on a bad confidence). The reported confidence must still
+    # be a real percentage — clamped to [0,100], matching the score path — never >100 or <0.
+    committee = ["warren_buffett", "cathie_wood"]
+    sig = _signals(
+        "NVDA",
+        {
+            "warren_buffett": {"signal": "bullish", "confidence": 150},  # over-range
+            "cathie_wood": {"signal": "bullish", "confidence": -20},  # under-range
+        },
+    )
+    res = _aggregate("NVDA", committee, sig)
+    assert 0.0 <= res.confidence <= 100.0  # would be 65.0 unclamped (mean of 150 & -20)
+    assert res.confidence == 50.0  # clamped: mean of 100 and 0
+
+
 def test_aggregate_omits_analysts_that_did_not_run():
     # committee has 3; only one produced a signal → mean over that one, others absent.
     committee = ["warren_buffett", "cathie_wood", "michael_burry"]

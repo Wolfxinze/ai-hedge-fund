@@ -101,7 +101,10 @@ def _aggregate(ticker: str, committee: list[str], signals: dict[str, dict[str, d
         }
         if not degraded:
             scores.append(score)
-            confidences.append(float(raw.get("confidence", 50)))  # coercible: _safe_agent_score passed
+            # Clamp to [0,100] like signal_to_score does for the score (scoring.py): a valid
+            # signal with an out-of-range confidence passes _safe_agent_score, so report the
+            # confidence we actually acted on — never a >100%/<0% figure in the report.
+            confidences.append(max(0.0, min(100.0, float(raw.get("confidence", 50)))))
 
     mean_score = mean_or_none(scores)
     if mean_score is None:
