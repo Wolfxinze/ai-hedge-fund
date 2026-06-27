@@ -140,7 +140,18 @@ def _claim_figures_missing(claim: str | None, excerpt: str | None) -> bool:
 
 
 def _is_keyword_salad(excerpt: str | None) -> bool:
-    """True iff a long-enough excerpt has zero function words (keyword stuffing)."""
+    """True iff a long-enough excerpt has zero function words (keyword stuffing).
+
+    Pure-digit tokens count toward the threshold like any other token. Exempting
+    numeric data rows (a bare filing table line, "Revenue 1234 1198 1056 ...") was
+    explored under #43 and is wontfix-by-design: every such exemption — whether a
+    digit-stripped count or a digit-MAJORITY test — necessarily re-opens a stuffing
+    evasion, because the gate cannot tell genuine numbers backing a claim from
+    arbitrary numbers padding a keyword bag (a stuffer pads claim terms with numbers
+    to slip under, or dominate, the count). The gate stays strict: a truly bare
+    numeric row is a rare excerpt shape — real backing carries prose, which adds
+    function words — and over-strictness here withholds a grade, never mints a false
+    substantiation (the dangerous direction). See tests pinning this decision."""
     words = _WORD_RE.findall(_norm(excerpt))
     if len(words) < _MIN_EXCERPT_WORDS:
         return False
