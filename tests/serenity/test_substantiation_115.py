@@ -225,3 +225,46 @@ def test_micrometre_unit_normalizes_both_codepoints():
     # The micrometre figure must match whether written with the micro sign (µ, U+00B5)
     # or a greek mu (μ, U+03BC); NFKC folds the former to the latter.
     assert _figures("a 3µm node") == _figures("a 3μm node") == {"3μm"}
+
+
+# ── §11.5 (#43): numeric surface-forms are wontfix-by-design, decisions pinned ────
+# All three #43 surface-form items resolve to "keep the gate as-is" — each candidate
+# fix would weaken a deterministic guard. These tests pin those decisions so a future
+# refactor cannot silently regress them.
+
+def test_bare_numeric_data_row_is_treated_as_salad():
+    # #43 (salad table-header) — WONTFIX. A function-word-free bare numeric data row is
+    # deliberately still a keyword salad. Exempting it (by a digit-stripped count OR a
+    # digit-majority test) necessarily re-opens a stuffing evasion: the gate cannot
+    # distinguish real numbers backing a claim from arbitrary numbers padding a keyword
+    # bag. Over-strictness here only WITHHOLDS a grade (a bare row is rare — real backing
+    # carries prose); it never mints a false substantiation. Pinned vs reintroduction.
+    claim = "Revenue and operating income both rose this quarter"
+    row = "Revenue 1234 1198 1056 operating 412 389 350 income 298 276"
+    assert _is_keyword_salad(row) is True
+    assert is_substantiated(claim, row) is False
+    assert substantiation_reason(claim, row, SourceType.FILING) == "keyword_stuffing"
+
+
+def test_keyword_stuffing_not_evaded_by_padding_digits():
+    # The evasion any numeric exemption would open: claim keywords padded with arbitrary
+    # (here digit-MAJORITY) numbers. The strict gate counts digits like any token, so it
+    # stays a salad and is NOT substantiated. Both a digit-stripped count AND a
+    # digit-dominance exemption would flip this to a false "ok" — this reds if either
+    # regression lands.
+    claim = "gallium nitride supplier bottleneck epitaxy"
+    padded = "gallium nitride supplier bottleneck 100 200 300 400 500"
+    assert _is_keyword_salad(padded) is True
+    assert is_substantiated(claim, padded) is False
+    assert substantiation_reason(claim, padded, SourceType.FILING) == "keyword_stuffing"
+
+
+def test_dollar_figure_not_satisfied_by_bare_number():
+    # #43 surface-form decision (wontfix-by-design): "$" is part of the figure key, so
+    # a "$1,200" claim is NOT backed by a bare "1200" in the excerpt — an unmarked
+    # integer is ambiguous (a count / year / id) and §11.5 deliberately does not gate
+    # on it. Pinned so the asymmetry cannot silently regress into a false match.
+    claim = "The acquisition closed at a price of $1,200 per share agreement"
+    excerpt = "The acquisition agreement disclosed a closing price of 1200 for the deal terms"
+    assert is_substantiated(claim, excerpt) is False
+    assert substantiation_reason(claim, excerpt, SourceType.FILING) == "figure_missing"
