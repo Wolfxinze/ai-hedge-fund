@@ -165,6 +165,7 @@ def eastmoney_search(keyword: str, count: int = 10) -> list[dict[str, Any]]:
 
     ``mkt_num``: 105=NASDAQ, 106=NYSE, 107=US other/ETF, 116=HK.
     """
+    # Public, shared token shipped with the upstream key-less suggest endpoint — not a user secret.
     params = {"input": keyword, "type": 14, "token": "D43BF722C8E33BDC906FB84D85E326E8", "count": count}
     response = requests.get(_SEARCH_URL, params=params, headers={"User-Agent": _UA}, timeout=_TIMEOUT)
     response.raise_for_status()

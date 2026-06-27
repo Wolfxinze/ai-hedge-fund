@@ -174,6 +174,25 @@ def _to_eastmoney_secucode(ticker: str, mkt_num: int, code: str) -> str:
     return f"{code}.O"  # 105 NASDAQ / 107 other
 
 
+def _em_key(value: str) -> str:
+    """Normalise a ticker/code for matching (drop .HK suffix, case, leading zeros)."""
+    return value.upper().replace(".HK", "").lstrip("0")
+
+
+def _pick_eastmoney_match(matches: list[dict[str, Any]], ticker: str) -> dict[str, Any]:
+    """Prefer an exact code match for ``ticker`` before falling back to the top hit.
+
+    The suggest endpoint ranks by relevance, but a bare numeric/short code can
+    substring-match a different listing; an exact-code preference stops the
+    fallback from silently resolving fundamentals for the wrong security.
+    """
+    want = _em_key(ticker)
+    for match in matches:
+        if _em_key(str(match.get("code") or "")) == want:
+            return match
+    return matches[0]
+
+
 class GlobalStockDataProvider(FinancialDataProvider):
     name = "globalstockdata"
 
@@ -336,7 +355,14 @@ class GlobalStockDataProvider(FinancialDataProvider):
         news: list[CompanyNews] = []
         for item in items:
             published = item.get("providerPublishTime")
-            date_str = datetime.datetime.fromtimestamp(published, datetime.timezone.utc).isoformat() if published else end_date
+            # Undated items fall back to "now" (not end_date) so the date filter
+            # still applies instead of always admitting them at the window edge.
+            when = (
+                datetime.datetime.fromtimestamp(published, datetime.timezone.utc)
+                if published
+                else datetime.datetime.now(datetime.timezone.utc)
+            )
+            date_str = when.isoformat()
             parsed = _date(date_str)
             if start and parsed and parsed < start:
                 continue
@@ -462,8 +488,7 @@ class GlobalStockDataProvider(FinancialDataProvider):
             return []
 
         records: list[dict[str, Any]] = []
-        window = limit + (3 if is_ttm else 0)
-        for index, report_period in enumerate(periods[: max(limit, window)][:limit]):
+        for index, report_period in enumerate(periods[:limit]):
             trailing = periods[index : index + 4] if is_ttm else [report_period]
             if is_ttm and len(trailing) < 4:
                 continue
@@ -511,7 +536,9 @@ class GlobalStockDataProvider(FinancialDataProvider):
         if is_ttm and item in _FLOW_ITEMS:
             values = [by_period.get(p, {}).get(item) for p in trailing]
             present = [v for v in values if v is not None]
-            return sum(present) if len(present) == 4 else (present[0] if present else None)
+            # Require all four trailing quarters: a partial sum mislabeled "ttm"
+            # would understate the figure and corrupt every ratio built on it.
+            return sum(present) if len(present) == 4 else None
         return by_period.get(report_period, {}).get(item)
 
     def _metrics_from_statements(self, ticker, period, records, stats) -> list[FinancialMetrics]:
@@ -610,7 +637,7 @@ class GlobalStockDataProvider(FinancialDataProvider):
         matches = client.eastmoney_search(ticker)
         if not matches:
             return []
-        top = matches[0]
+        top = _pick_eastmoney_match(matches, ticker)
         secucode = _to_eastmoney_secucode(ticker, top["mkt_num"], str(top["code"]))
         rows = client.eastmoney_key_indicators(secucode, page_size=limit + 4)
         rows = [r for r in rows if (r.get("REPORT_DATE") or "")[:10] <= end_date][:limit]
