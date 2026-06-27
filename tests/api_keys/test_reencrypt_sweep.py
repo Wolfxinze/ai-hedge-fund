@@ -90,6 +90,7 @@ from app.backend.services.key_migration import ReencryptResult, reencrypt_plaint
 
 # ── PURE FUNCTION TESTS ──────────────────────────────────────────────────────
 
+
 class TestReencryptPlaintextApiKeys:
     def test_plaintext_row_is_upgraded(self, session):
         """A plaintext row is re-encrypted: stored value changes and round-trips back."""
@@ -125,9 +126,7 @@ class TestReencryptPlaintextApiKeys:
 
         after_token = _raw(session, "OPENAI_API_KEY")
         # Byte-identical: proves skip-by-TAG, not just "still encrypted"
-        assert after_token == captured_token, (
-            "already-encrypted row must be byte-identical after sweep (no churn)"
-        )
+        assert after_token == captured_token, "already-encrypted row must be byte-identical after sweep (no churn)"
         assert result.skipped_encrypted == 1
         assert result.upgraded == 0
 
@@ -194,9 +193,7 @@ class TestReencryptPlaintextApiKeys:
         """No rows → all counts zero, no error."""
         result = reencrypt_plaintext_api_keys(session, _on())
 
-        assert result == ReencryptResult(
-            scanned=0, upgraded=0, skipped_encrypted=0, skipped_empty=0
-        )
+        assert result == ReencryptResult(scanned=0, upgraded=0, skipped_encrypted=0, skipped_empty=0)
 
     def test_inactive_rows_are_also_upgraded(self, session):
         """Inactive (is_active=False) rows must be upgraded — every at-rest secret counts."""
@@ -240,17 +237,15 @@ class TestReencryptPlaintextApiKeys:
         SQLite scans rows by rowid, so the good row (inserted first) is upgraded before the poison
         row (inserted second) raises.
         """
-        _insert_raw(session, "OPENAI_API_KEY", "sk-good")        # processed first → gets mutated
-        _insert_raw(session, "ANTHROPIC_API_KEY", "sk-poison")   # processed second → trips the guard
+        _insert_raw(session, "OPENAI_API_KEY", "sk-good")  # processed first → gets mutated
+        _insert_raw(session, "ANTHROPIC_API_KEY", "sk-poison")  # processed second → trips the guard
         cipher = _PoisonCipher(_on(), poison="sk-poison")
 
         with pytest.raises(CryptoError):
             reencrypt_plaintext_api_keys(session, cipher)
 
         # Rollback reverted the earlier in-memory upgrade: BOTH rows are still original plaintext.
-        assert _raw(session, "OPENAI_API_KEY") == "sk-good", (
-            "earlier upgrade must be rolled back, not left half-applied in the session"
-        )
+        assert _raw(session, "OPENAI_API_KEY") == "sk-good", "earlier upgrade must be rolled back, not left half-applied in the session"
         assert _raw(session, "ANTHROPIC_API_KEY") == "sk-poison"
 
 

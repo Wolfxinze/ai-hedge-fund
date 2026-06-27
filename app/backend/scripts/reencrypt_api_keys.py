@@ -44,8 +44,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if not is_encryption_enabled():
         print(
-            "refusing: KEY_ENCRYPTION is not enabled; set KEY_ENCRYPTION=on and ensure "
-            "the master key is provisioned before running the re-encrypt sweep",
+            "refusing: KEY_ENCRYPTION is not enabled; set KEY_ENCRYPTION=on and ensure " "the master key is provisioned before running the re-encrypt sweep",
             file=sys.stderr,
         )
         return 2
@@ -57,16 +56,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.dry_run:
             result = reencrypt_plaintext_api_keys(db, cipher, commit=False)
             db.rollback()
-            print(
-                f"[dry-run] scanned={result.scanned} upgraded={result.upgraded} "
-                f"skipped_encrypted={result.skipped_encrypted} skipped_empty={result.skipped_empty}"
-            )
+            print(f"[dry-run] scanned={result.scanned} upgraded={result.upgraded} " f"skipped_encrypted={result.skipped_encrypted} skipped_empty={result.skipped_empty}")
         else:
             result = reencrypt_plaintext_api_keys(db, cipher, commit=True)
-            print(
-                f"scanned={result.scanned} upgraded={result.upgraded} "
-                f"skipped_encrypted={result.skipped_encrypted} skipped_empty={result.skipped_empty}"
-            )
+            print(f"scanned={result.scanned} upgraded={result.upgraded} " f"skipped_encrypted={result.skipped_encrypted} skipped_empty={result.skipped_empty}")
     except Exception as exc:
         # Fail loud with the error TYPE + message (not a bare str) so the operator can tell a
         # CryptoError apart from, say, an OperationalError at a glance. The sweep already rolls
