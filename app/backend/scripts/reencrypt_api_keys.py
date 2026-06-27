@@ -55,6 +55,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.dry_run:
             result = reencrypt_plaintext_api_keys(db, cipher, commit=False)
+            # Defense-in-depth, NOT independently exercised: with commit=False nothing is persisted,
+            # and the `finally: db.close()` below discards the uncommitted transaction anyway — so the
+            # at-rest bytes are plaintext with or without this explicit rollback (close-rollback masks
+            # it). Kept to make the no-persist intent explicit at the call site; do not remove it.
             db.rollback()
             print(f"[dry-run] scanned={result.scanned} upgraded={result.upgraded} " f"skipped_encrypted={result.skipped_encrypted} skipped_empty={result.skipped_empty}")
         else:
@@ -62,9 +66,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"scanned={result.scanned} upgraded={result.upgraded} " f"skipped_encrypted={result.skipped_encrypted} skipped_empty={result.skipped_empty}")
     except Exception as exc:
         # Fail loud with the error TYPE + message (not a bare str) so the operator can tell a
-        # CryptoError apart from, say, an OperationalError at a glance. The sweep already rolls
-        # back internally on any error; rollback here too (belt-and-suspenders) so the explicit
-        # "no rows committed" line below is truthful regardless of where the failure originated.
+        # CryptoError apart from, say, an OperationalError at a glance.
+        # This rollback is redundant-but-intentional defense-in-depth: the inner sweep
+        # (reencrypt_plaintext_api_keys) already rolls back + re-raises on any error, and the
+        # `finally: db.close()` below discards any uncommitted state regardless. We keep it so the
+        # explicit "no rows committed" line is truthful even if a future caller path skips one of
+        # those guarantees — never remove it to "simplify".
         db.rollback()
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         print("no rows committed (rolled back)", file=sys.stderr)

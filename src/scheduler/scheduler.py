@@ -83,6 +83,8 @@ def _remove_monitor_job(scheduler: BackgroundScheduler, monitor_id: int) -> None
         scheduler.remove_job(job_id)
         if scheduler.get_job(job_id) is not None:
             logger.warning("scheduler: job %r persisted after remove_job (in-memory disarm failed; DB enabled-guard still authoritative)", job_id)
+        else:
+            logger.info("scheduler: disarmed job %r", job_id)
 
 
 def default_run_analysts_factory() -> RunAnalysts:
