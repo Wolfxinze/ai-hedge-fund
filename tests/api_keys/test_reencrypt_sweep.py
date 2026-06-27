@@ -20,6 +20,10 @@ WHY the key tests matter (curated, not exhaustive):
   rows already upgraded earlier in the SAME sweep — the "never a partial mutation" guarantee.
 - CLI guard test: main() must refuse (exit 2, stderr message) when KEY_ENCRYPTION is off
   so the sweep can never silently no-op on a plaintext-mode deployment.
+- CLI behavior tests: with encryption on, main([]) commits the upgrade (exit 0, row tagged
+  at rest); --dry-run previews then rolls back (exit 0, row stays plaintext); an unexpected
+  sweep error is caught loud (exit 1, typed error + "no rows committed" on stderr, nothing
+  persisted) with --verbose adding a traceback.
 """
 
 import pytest
@@ -252,37 +256,25 @@ class TestReencryptPlaintextApiKeys:
 
 # ── EMPTY key_value BRANCH ───────────────────────────────────────────────────
 class TestEmptyKeyValueBranch:
-    def test_empty_string_key_value_counted_as_skipped_empty(self):
+    def test_empty_string_key_value_counted_as_skipped_empty(self, session):
         """Empty key_value is counted as skipped_empty (no encryption attempted).
 
         Note on schema: ApiKey.key_value is Column(Text, nullable=False) — SQLAlchemy
         enforces non-null at the Python ORM layer, but does NOT enforce non-empty string.
-        An empty string ("") passes ORM validation. We drive this directly (no DB insert)
-        to keep the test focused on the function's branching logic.
+        An empty string ("") passes ORM validation. Driven via a REAL in-memory SQLite
+        insert (mirroring the other function tests) so the row goes through the same
+        ORM/query path production uses — not a hand-rolled mock.
         """
-        from app.backend.services.key_migration import reencrypt_plaintext_api_keys
-
-        # Build a minimal fake row (no DB needed — testing branching logic only)
-        row = ApiKey(provider="EMPTY_KEY", key_value="", is_active=True)
-
-        class _FakeQuery:
-            def __init__(self, rows):
-                self._rows = rows
-            def all(self):
-                return self._rows
-
-        class _FakeDB:
-            def query(self, _model):
-                return _FakeQuery([row])
-            def commit(self):
-                pass
-
+        _insert_raw(session, "EMPTY_KEY", "")
         cipher = _on()
-        result = reencrypt_plaintext_api_keys(_FakeDB(), cipher)
 
+        result = reencrypt_plaintext_api_keys(session, cipher)
+
+        assert result.scanned == 1
         assert result.skipped_empty == 1
         assert result.upgraded == 0
-        assert row.key_value == ""  # not mutated
+        # Not mutated: the stored value is still the empty string after the sweep.
+        assert _raw(session, "EMPTY_KEY") == ""
 
 
 # ── CLI GUARD TESTS ───────────────────────────────────────────────────────────
@@ -319,3 +311,120 @@ class TestCliGuard:
         assert exit_code == 2
         captured = capsys.readouterr()
         assert "KEY_ENCRYPTION" in captured.err
+
+
+# ── CLI BEHAVIOR TESTS (full main() flow) ────────────────────────────────────
+@pytest.fixture
+def enc_on(monkeypatch):
+    """Enable KEY_ENCRYPTION and provision a master key via AHF_MASTER_KEY (env path,
+    no OS keyring) so the REAL get_cipher() resolves a working Fernet. Clears the
+    process-level Fernet cache before and after so tests don't leak a resolved key.
+    """
+    monkeypatch.setenv("KEY_ENCRYPTION", "on")
+    monkeypatch.setenv("AHF_MASTER_KEY", _KEY.decode())
+    reset_crypto_cache()
+    yield
+    reset_crypto_cache()
+
+
+def _wire_session_local(monkeypatch, session):
+    """Point the script's SessionLocal at a callable returning the test session.
+
+    main() calls SessionLocal() once and db.close() in finally; closing an in-memory
+    session is harmless and the assertions re-query through the same engine binding.
+    """
+    import app.backend.scripts.reencrypt_api_keys as cli
+
+    monkeypatch.setattr(cli, "SessionLocal", lambda: session)
+    return cli
+
+
+class TestCliBehavior:
+    def test_main_happy_path_commits_upgrade_and_exits_0(self, monkeypatch, capsys, session, enc_on):
+        """main([]) with encryption on + a plaintext row commits the upgrade and exits 0.
+
+        WHY: the default (commit) path must actually persist the re-encryption — after the
+        run the at-rest value is tag-encrypted and round-trips back to the original secret.
+        """
+        _insert_raw(session, "OPENAI_API_KEY", "sk-plain")
+        cli = _wire_session_local(monkeypatch, session)
+
+        exit_code = cli.main([])
+
+        assert exit_code == 0
+        # Persisted: the row is now tag-encrypted at rest (commit happened).
+        stored = _raw(session, "OPENAI_API_KEY")
+        assert stored.startswith(TAG), "happy path must persist the tag-encrypted upgrade"
+        assert _on().decrypt(stored) == "sk-plain"
+        out = capsys.readouterr().out
+        assert "upgraded=1" in out
+        assert "[dry-run]" not in out
+
+    def test_main_dry_run_previews_then_rolls_back_and_exits_0(self, monkeypatch, capsys, session, enc_on):
+        """main(['--dry-run']) previews counts, rolls back, exits 0, leaves rows plaintext.
+
+        WHY: operators must be able to preview the sweep with zero side effects; the row
+        stays plaintext at rest even though the report says it WOULD be upgraded.
+        """
+        _insert_raw(session, "OPENAI_API_KEY", "sk-plain")
+        cli = _wire_session_local(monkeypatch, session)
+
+        exit_code = cli.main(["--dry-run"])
+
+        assert exit_code == 0
+        # Rolled back: the row is still the original plaintext at rest.
+        assert _raw(session, "OPENAI_API_KEY") == "sk-plain", "dry-run must not persist"
+        out = capsys.readouterr().out
+        assert out.startswith("[dry-run]")
+        assert "upgraded=1" in out
+
+    def test_main_unexpected_error_exits_1_to_stderr_commits_nothing(self, monkeypatch, capsys, session, enc_on):
+        """An unexpected error inside the sweep is caught: exit 1, stderr, nothing committed.
+
+        WHY: a runtime failure must surface loudly (typed error on stderr + a visible
+        "no rows committed" line so the rollback is explicit) and never silently exit 0 or
+        leave a partially-applied mutation.
+        """
+        _insert_raw(session, "OPENAI_API_KEY", "sk-plain")
+        cli = _wire_session_local(monkeypatch, session)
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("boom in sweep")
+
+        monkeypatch.setattr(cli, "reencrypt_plaintext_api_keys", _boom)
+
+        exit_code = cli.main([])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        # Typed error name + message on stderr (the ergonomics upgrade), not bare stdout.
+        assert "RuntimeError" in captured.err
+        assert "boom in sweep" in captured.err
+        # The rollback is made visible so the operator knows nothing was persisted.
+        assert "no rows committed" in captured.err
+        assert captured.out == ""
+        # Nothing committed: the row is still the original plaintext at rest.
+        assert _raw(session, "OPENAI_API_KEY") == "sk-plain"
+
+    def test_main_verbose_flag_prints_traceback_on_error(self, monkeypatch, capsys, session, enc_on):
+        """--verbose adds a traceback to the typed error on the exit-1 path.
+
+        WHY: operators debugging a failed sweep need the stack, but the default output stays
+        terse (a one-line typed error); --verbose is the opt-in for the full traceback.
+        """
+        _insert_raw(session, "OPENAI_API_KEY", "sk-plain")
+        cli = _wire_session_local(monkeypatch, session)
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("boom in sweep")
+
+        monkeypatch.setattr(cli, "reencrypt_plaintext_api_keys", _boom)
+
+        exit_code = cli.main(["--verbose"])
+
+        assert exit_code == 1
+        err = capsys.readouterr().err
+        assert "RuntimeError" in err
+        # A traceback names the function frame where the error was raised.
+        assert "Traceback (most recent call last)" in err
+        assert "_boom" in err
