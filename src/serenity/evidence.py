@@ -86,6 +86,14 @@ def _tokens(text: str | None) -> set[str]:
 # means occasions, not an "Nx" multiplier, so promoting it would mint a phantom
 # figure requirement and suppress genuinely-backed claims (same ambiguity class as
 # "$1,200" vs a bare "1200" — an ambiguous number is not gated, per §11.5).
+# Known limitation (#43): the micrometre fallback unit "um" doubles as the English
+# filler/interjection "um". Because a unit only binds when it directly follows a
+# number (the leading lookbehind + trailing boundary), the collision is NARROW —
+# only a "<number> um" sequence misfires, e.g. transcribed prose "...got 5 um maybe
+# 6..." reads "5um" as a spurious micrometre figure. This is an ACCEPTED trade-off:
+# per #43 the gate stays strict — "um" is retained so legitimate technical claims
+# ("40 um feature size") are still caught — rather than dropping the token to spare
+# the rare informal-speech false positive.
 _FIGURE_RE = re.compile(
     r"(?<![a-z0-9])(\$?)(\d[\d,]*(?:\.\d+)?)\s?"
     r"(%|percent|pct|nm|μm|um|ghz|mhz|kw|mw|gw|billion|trillion|million|thousand|bn|b|m|t|k|x)?"
