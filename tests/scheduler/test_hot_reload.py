@@ -70,6 +70,7 @@ def _make_monitor(factory, *, name="hot_mon", schedule=None, enabled=True, granu
         mon_enabled = mon.enabled
 
     from types import SimpleNamespace
+
     return SimpleNamespace(id=mid, name=mon_name, schedule=mon_schedule, granularity=mon_granularity, enabled=mon_enabled)
 
 
@@ -130,9 +131,7 @@ def test_reschedule_updates_trigger_on_schedule_change(sch, factory):
         reschedule_monitor(sch, mon, session_factory=factory)
 
         trigger_after = str(sch.get_job(monitor_job_id(mon.id)).trigger)
-        assert trigger_before != trigger_after, (
-            "trigger must change when schedule changes; weekly and monthly produce different cron expressions"
-        )
+        assert trigger_before != trigger_after, "trigger must change when schedule changes; weekly and monthly produce different cron expressions"
     finally:
         stop_scheduler(sch)
 
@@ -147,10 +146,7 @@ def test_reschedule_invalid_schedule_does_not_raise_and_logs_warning_and_leaves_
         reschedule_monitor(sch, mon, session_factory=factory)  # must NOT raise
 
     assert sch.get_job(monitor_job_id(mon.id)) is None, "invalid schedule must leave no job"
-    assert any(
-        "hot-reload" in r.getMessage() or "invalid schedule" in r.getMessage()
-        for r in caplog.records
-    ), "a WARNING must be logged for an invalid schedule"
+    assert any("hot-reload" in r.getMessage() or "invalid schedule" in r.getMessage() for r in caplog.records), "a WARNING must be logged for an invalid schedule"
 
 
 def test_reschedule_idempotent_for_enabled_monitor(sch, factory):
@@ -184,3 +180,66 @@ def test_reschedule_idempotent_for_disabled_monitor(sch, factory):
     reschedule_monitor(sch, mon, session_factory=factory)  # must not raise
 
     assert sch.get_job(monitor_job_id(mon.id)) is None
+
+
+def test_reschedule_evicts_existing_job_when_reenabled_with_invalid_schedule(sch, factory):
+    """reschedule_monitor EVICTS a previously-armed LIVE job when the monitor is re-enabled with a
+    now-invalid schedule.
+    WHY (#48): distinct from the no-job-start case — an existing armed job (a monitor that was valid
+    and is in the RUNNING job store) must be removed when an edit makes its schedule invalid, so a
+    stale, out-of-date job can never keep firing. Started scheduler because the first job must be
+    flushed to the live store for this to exercise the running-layer eviction (a non-started
+    scheduler's _pending_jobs has divergent get_job semantics).
+    MUTATION-PROOF: deleting the except-branch ``_remove_monitor_job`` call in reschedule_monitor
+    leaves the stale valid job in the store → this assertion FAILS."""
+    from src.scheduler.scheduler import start_scheduler, stop_scheduler
+
+    mon = _make_monitor(factory, name="reenable_bad", granularity="weekly", enabled=True)
+    job_id = monitor_job_id(mon.id)
+
+    start_scheduler(sch)
+    try:
+        # Arm a VALID job and confirm it is live in the running store.
+        reschedule_monitor(sch, mon, session_factory=factory)
+        assert sch.get_job(job_id) is not None, "pre-condition: a valid job must be armed in the live store"
+
+        # Re-enable with an INVALID schedule (simulates an edit that stored a bad cron).
+        # monitor_schedule() returns .schedule when set, so this overrides the weekly granularity.
+        mon.enabled = True
+        mon.schedule = "not-a-cron"
+        reschedule_monitor(sch, mon, session_factory=factory)  # must NOT raise
+
+        assert sch.get_job(job_id) is None, "a previously-armed live job must be EVICTED when re-enabled with an invalid schedule"
+    finally:
+        stop_scheduler(sch)
+
+
+def test_remove_monitor_job_warns_if_job_persists_after_removal(sch, factory, caplog, monkeypatch):
+    """_remove_monitor_job logs a WARNING if the job is STILL present after remove_job (observability
+    only — the authoritative disarm is the DB-checked guard in run_monitor_job, not the in-memory
+    job table; #48).
+    MUTATION-PROOF / verification approach: monkeypatch remove_job to a no-op so get_job still returns
+    the job post-remove → assert the warning fires. Deleting the warning line in _remove_monitor_job
+    makes this assertion FAIL (the no-op remove leaves the job and no warning is emitted)."""
+    from src.scheduler.scheduler import _add_monitor_job, _remove_monitor_job
+
+    mon = _make_monitor(factory, name="stuck_job", enabled=True)
+    job_id = monitor_job_id(mon.id)
+
+    _add_monitor_job(
+        sch,
+        monitor_id=mon.id,
+        name=mon.name,
+        schedule="weekly",
+        analyzing_flow=None,
+        session_factory=factory,
+    )
+    assert sch.get_job(job_id) is not None  # pre-condition: job is present
+
+    # Make remove_job a no-op so the job survives the removal attempt.
+    monkeypatch.setattr(sch, "remove_job", lambda *a, **k: None)
+
+    with caplog.at_level(logging.WARNING, logger="src.scheduler.scheduler"):
+        _remove_monitor_job(sch, mon.id)
+
+    assert any("persist" in r.getMessage().lower() and str(job_id) in r.getMessage() for r in caplog.records), "a WARNING must be logged when a job persists after remove_job"
