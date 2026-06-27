@@ -297,6 +297,56 @@ def test_create_mixed_valid_and_unknown_analysts_is_422(env):
     assert "bogus_id" in detail and not any(v in detail for v in valid)  # only the typo is surfaced
 
 
+def test_patch_null_selected_analysts_clears_then_omit_leaves_unchanged(env):
+    """selected_analysts is a NULLABLE column, so explicit null legitimately CLEARS it (unlike
+    tickers/granularity/enabled). Create with analysts set → PATCH {selected_analysts: null} clears it
+    (200, value None) → a later PATCH with the field OMITTED leaves it cleared (true partial update)."""
+    ids = _valid_analyst_ids()
+    mid = env.client.post("/monitors", json={"name": "clearable", "tickers": ["NVDA"], "selected_analysts": ids}).json()["id"]
+    cleared = env.client.patch(f"/monitors/{mid}", json={"selected_analysts": None})
+    assert cleared.status_code == 200 and cleared.json()["selected_analysts"] is None  # null clears
+    # omitting selected_analysts on a later patch leaves it cleared (not re-populated)
+    assert env.client.patch(f"/monitors/{mid}", json={"enabled": True}).json()["selected_analysts"] is None
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_create_blank_analyst_id_is_422(env, blank):
+    """A blank/whitespace analyst id is not in ANALYST_CONFIG, so it 422s (pins existing behavior: the
+    allowlist check rejects it, no silent store of an unresolvable id)."""
+    r = env.client.post("/monitors", json={"name": f"blank_{len(blank)}", "tickers": ["NVDA"], "selected_analysts": [blank]})
+    assert r.status_code == 422
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_patch_blank_analyst_id_is_422(env, blank):
+    """Same blank-id rejection on the PATCH boundary."""
+    mid = env.client.post("/monitors", json={"name": f"blankp_{len(blank)}", "tickers": ["NVDA"]}).json()["id"]
+    assert env.client.patch(f"/monitors/{mid}", json={"selected_analysts": [blank]}).status_code == 422
+
+
+def test_create_too_many_analysts_is_422(env, monkeypatch):
+    """selected_analysts is capped at _MAX_ANALYSTS (sibling-consistency with tickers/platform_keys);
+    a list above the cap 422s at the Field boundary BEFORE the route body runs. The allowlist check is
+    neutralised to a no-op so ONLY the Field cap can produce the 422 — isolating the cap (drop the
+    max_length and this reds, because the over-cap unknown ids would otherwise have been let through)."""
+    import app.backend.routes.monitors as monitors_mod
+
+    monkeypatch.setattr(monitors_mod, "_validate_selected_analysts", lambda *_a, **_k: None)
+    over = [f"analyst_{i}" for i in range(monitors_mod._MAX_ANALYSTS + 1)]
+    assert env.client.post("/monitors", json={"name": "manyanalysts", "tickers": ["NVDA"], "selected_analysts": over}).status_code == 422
+
+
+def test_patch_too_many_analysts_is_422(env, monkeypatch):
+    """Same _MAX_ANALYSTS cap on the PATCH boundary, with the allowlist neutralised so only the Field
+    cap can 422 — isolating the cap from the unknown-id allowlist path."""
+    import app.backend.routes.monitors as monitors_mod
+
+    monkeypatch.setattr(monitors_mod, "_validate_selected_analysts", lambda *_a, **_k: None)
+    mid = env.client.post("/monitors", json={"name": "growanalysts", "tickers": ["NVDA"]}).json()["id"]
+    over = [f"analyst_{i}" for i in range(monitors_mod._MAX_ANALYSTS + 1)]
+    assert env.client.patch(f"/monitors/{mid}", json={"selected_analysts": over}).status_code == 422
+
+
 # ── patch ──────────────────────────────────────────────────────────────────────
 
 
@@ -412,7 +462,9 @@ def test_run_releases_permit_after_success(env):
 
 def test_run_releases_permit_on_error_path(env, monkeypatch):
     """If run_monitor raises, the error propagates (uncaught → TestClient re-raises) AND the permit is
-    released in `finally` — proving an exception cannot strand a permit and wedge the cap permanently."""
+    released in `finally` — proving an exception cannot strand a permit and wedge the cap permanently.
+    The release is verified by reclaiming every permit directly (as the 404/422 paths do), so the
+    `run_monitor` patch needs no manual undo — the fixture auto-undoes it at teardown."""
     import app.backend.routes.monitors as monitors_mod
 
     def boom(*_a, **_k):
@@ -422,9 +474,14 @@ def test_run_releases_permit_on_error_path(env, monkeypatch):
     monkeypatch.setattr(monitors_mod, "run_monitor", boom)
     with pytest.raises(RuntimeError, match="flow exploded mid-run"):  # propagated, not swallowed
         env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"})
-    monkeypatch.undo()  # restore run_monitor so the follow-up run can succeed
-    # permit released by `finally`: a subsequent normal run succeeds (would 429 if the permit leaked)
-    assert env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"}).status_code == 200
+    # permit released by `finally`: every permit is reclaimable (would not be if the error path leaked one)
+    acquired = [monitors_mod._run_semaphore.acquire(blocking=False) for _ in range(monitors_mod._MAX_CONCURRENT_RUNS)]
+    try:
+        assert all(acquired), "every permit must be reclaimable after an error-path run (no leak)"
+    finally:
+        for ok in acquired:
+            if ok:
+                monitors_mod._run_semaphore.release()
 
 
 def test_run_releases_permit_on_404(env):
@@ -453,6 +510,27 @@ def test_run_releases_permit_on_422(env):
     acquired = [monitors_mod._run_semaphore.acquire(blocking=False) for _ in range(monitors_mod._MAX_CONCURRENT_RUNS)]
     try:
         assert all(acquired), "every permit must be reclaimable after a 422 run (no leak)"
+    finally:
+        for ok in acquired:
+            if ok:
+                monitors_mod._run_semaphore.release()
+
+
+def test_run_releases_permit_on_503_db_locked(env, monkeypatch):
+    """A 'database is locked' OperationalError inside the guarded run maps to 503 (via
+    _db_locked_to_503) WITHOUT escaping the try whose `finally` releases — so the permit must be
+    reclaimed on the 503 path too. Verified by reclaiming EVERY permit afterwards (sensitive to even a
+    single stranded permit; a follow-up run alone would mask a one-permit leak since cap=2). The
+    fixture auto-undoes the run_monitor patch at teardown."""
+    import app.backend.routes.monitors as monitors_mod
+
+    mid = env.client.post("/monitors", json={"name": "locked503", "tickers": ["NVDA"]}).json()["id"]
+    monkeypatch.setattr(monitors_mod, "run_monitor", _raise_locked)  # exact type _db_locked_to_503 maps to 503
+    assert env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"}).status_code == 503
+    # permit released by `finally` on the 503 path: every permit is reclaimable (none stranded)
+    acquired = [monitors_mod._run_semaphore.acquire(blocking=False) for _ in range(monitors_mod._MAX_CONCURRENT_RUNS)]
+    try:
+        assert all(acquired), "every permit must be reclaimable after a 503 run (no leak)"
     finally:
         for ok in acquired:
             if ok:
@@ -576,6 +654,7 @@ def test_create_commit_integrityerror_maps_to_409():
 # surfaced as 503 (retryable), not an opaque 500. This is NOT a concurrency-atomicity claim — the
 # real two-writer race guarantees live in PoolLock's file-backed threaded test.
 
+
 class _LockedCommit(SASession):
     def commit(self):
         raise OperationalError("commit", {}, Exception("database is locked"))
@@ -685,15 +764,11 @@ def test_patch_disable_removes_job_then_enable_readds(env_with_scheduler):
 
     # Disable: job must disappear
     env_with_scheduler.client.patch(f"/monitors/{mid}", json={"enabled": False})
-    assert env_with_scheduler.sch.get_job(monitor_job_id(mid)) is None, (
-        "disabled monitor must have no job on the live scheduler"
-    )
+    assert env_with_scheduler.sch.get_job(monitor_job_id(mid)) is None, "disabled monitor must have no job on the live scheduler"
 
     # Re-enable: job must re-appear
     env_with_scheduler.client.patch(f"/monitors/{mid}", json={"enabled": True})
-    assert env_with_scheduler.sch.get_job(monitor_job_id(mid)) is not None, (
-        "re-enabled monitor must be re-registered on the live scheduler"
-    )
+    assert env_with_scheduler.sch.get_job(monitor_job_id(mid)) is not None, "re-enabled monitor must be re-registered on the live scheduler"
 
 
 def test_post_monitor_scheduling_failure_does_not_fail_write(env_with_scheduler, monkeypatch):
@@ -701,9 +776,8 @@ def test_post_monitor_scheduling_failure_does_not_fail_write(env_with_scheduler,
     WHY: the DB write is the source of truth; a scheduling side-effect failure is best-effort
     (the next restart re-snapshots). A 500 on a successful write would be worse than a silent
     scheduler miss (which is loud in logs via logger.exception)."""
-    # Patch add_job to always raise so _safe_reschedule triggers its exception path
-    original_add_job = env_with_scheduler.sch.add_job
 
+    # Patch add_job to always raise so _safe_reschedule triggers its exception path
     def boom(*args, **kwargs):
         raise RuntimeError("simulated scheduler failure")
 
@@ -756,9 +830,7 @@ def test_post_monitor_registers_exactly_one_live_job(env_with_started_scheduler)
     """POST /monitors yields EXACTLY ONE live job for the monitor on the running scheduler.
     WHY: production arms monitors against a RUNNING scheduler; on a started job store an add must
     produce exactly one job (no _pending_jobs duplication artefact)."""
-    mid = env_with_started_scheduler.client.post(
-        "/monitors", json={"name": "live_one", "tickers": ["NVDA"], "granularity": "weekly"}
-    ).json()["id"]
+    mid = env_with_started_scheduler.client.post("/monitors", json={"name": "live_one", "tickers": ["NVDA"], "granularity": "weekly"}).json()["id"]
     job_id = monitor_job_id(mid)
     matching = [j for j in env_with_started_scheduler.sch.get_jobs() if j.id == job_id]
     assert len(matching) == 1, "exactly one live job must exist for the monitor on a started scheduler"
@@ -769,9 +841,7 @@ def test_patch_disable_then_enable_on_started_scheduler(env_with_started_schedul
     """PATCH disable removes the live job; PATCH re-enable re-adds it (real before/after).
     WHY: against a RUNNING scheduler — as in production — disabling must immediately remove the live
     job and re-enabling must re-arm it, so the cadence stops/resumes without a restart."""
-    mid = env_with_started_scheduler.client.post(
-        "/monitors", json={"name": "live_toggle", "tickers": ["NVDA"]}
-    ).json()["id"]
+    mid = env_with_started_scheduler.client.post("/monitors", json={"name": "live_toggle", "tickers": ["NVDA"]}).json()["id"]
     job_id = monitor_job_id(mid)
     assert env_with_started_scheduler.sch.get_job(job_id) is not None  # armed on create
 
@@ -787,9 +857,7 @@ def test_patch_cadence_change_replaces_not_duplicates_live_job(env_with_started_
     WHY: production reschedules against a RUNNING scheduler, where add_job(replace_existing=True)
     must DEDUP to one job carrying the latest trigger — a non-started scheduler would instead
     accumulate two jobs and return the stale trigger, the exact divergence this fixture guards."""
-    mid = env_with_started_scheduler.client.post(
-        "/monitors", json={"name": "live_cadence", "tickers": ["NVDA"], "granularity": "weekly"}
-    ).json()["id"]
+    mid = env_with_started_scheduler.client.post("/monitors", json={"name": "live_cadence", "tickers": ["NVDA"], "granularity": "weekly"}).json()["id"]
     job_id = monitor_job_id(mid)
     trigger_before = str(env_with_started_scheduler.sch.get_job(job_id).trigger)
 
