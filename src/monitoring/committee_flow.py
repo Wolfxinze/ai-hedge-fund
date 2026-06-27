@@ -31,7 +31,15 @@ _CHALLENGING_AT = 40.0
 
 
 class RunScoringAnalysts(Protocol):
-    """The scoring-graph runner contract (matches ``scoring_graph.run_scoring_analysts``)."""
+    """The scoring-graph runner contract — the *positional subset* this flow relies on.
+
+    The concrete ``scoring_graph.run_scoring_analysts`` has a wider signature: beyond the
+    positional ``(tickers, selected_analysts, end_date)`` declared here it also accepts the
+    keyword-only, defaulted overrides ``start_date`` / ``model_name`` / ``model_provider``.
+    This flow never sets them (it calls positionally — see ``_flow`` below), so the Protocol
+    deliberately omits them. A reader diffing the two signatures should expect that gap: it
+    is the subset-vs-superset by design, not drift.
+    """
 
     def __call__(self, tickers: list[str], selected_analysts: list[str], end_date: str) -> tuple[dict[str, dict[str, dict]], dict]:
         ...
@@ -90,7 +98,12 @@ def _aggregate(ticker: str, committee: list[str], signals: dict[str, dict[str, d
     for key in committee:
         raw = signals.get(f"{key}_agent", {}).get(ticker)
         if raw is None:
-            continue  # analyst not run / no signal for this ticker → omit (mirrors component_scores)
+            # WATCH-POINT: an absent analyst is omitted, not scored zero — mirroring
+            # ``agents_bridge.component_scores`` ("omit (not zero)"). Accurate today, but it
+            # couples to that omit-vs-zero contract: if component_scores ever folds absent
+            # analysts in as a zero (or any other default), this branch and the mean below go
+            # stale and must change in lockstep.
+            continue
         score, degraded, reason = _safe_agent_score(raw)
         agent_reports[key] = {
             "signal": raw.get("signal") if not degraded else AgentSignal.NEUTRAL.value,
