@@ -24,12 +24,17 @@ WHY the key tests matter (curated, not exhaustive):
   at rest); --dry-run previews then rolls back (exit 0, row stays plaintext); an unexpected
   sweep error is caught loud (exit 1, typed error + "no rows committed" on stderr, nothing
   persisted) with --verbose adding a traceback.
+- dry-run at-rest test (#58): a --dry-run sweep leaves the row PLAINTEXT AT REST as observed by a
+  SECOND, committed-state-only session (StaticPool shared connection). Pins the no-persist
+  invariant; the CLI's explicit dry-run rollback is defense-in-depth, untestable-by-construction
+  under close-rollback (deleting it does not change the committed bytes a second session sees).
 """
 
 import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.backend.database.connection import Base
 from app.backend.database.models import ApiKey
@@ -372,6 +377,51 @@ class TestCliBehavior:
         out = capsys.readouterr().out
         assert out.startswith("[dry-run]")
         assert "upgraded=1" in out
+
+    def test_main_dry_run_leaves_row_plaintext_at_rest_observed_by_a_second_session(self, monkeypatch, capsys, enc_on):
+        """A --dry-run sweep must leave the row PLAINTEXT AT REST — observed from a SECOND, independent
+        session that sees only COMMITTED data (the strongest at-rest statement).
+
+        WHY a second session: the in-memory SQLite test session's own ``db.close()`` implicitly rolls
+        back, which can mask the CLI's EXPLICIT dry-run ``db.rollback()``. To make the dry-run safety
+        property observable we share one connection (StaticPool) and re-query via a separate session
+        whose transaction sees only committed state — so we assert against committed-vs-rolled-back
+        bytes, not the dry-run session's own dirty in-memory object.
+
+        NON-VACUITY (verified empirically, see /tmp probe in the #58 work): deleting the CLI's explicit
+        dry-run ``db.rollback()`` does NOT change this at-rest observation — because ``commit=False``
+        never persists and the CLI's ``finally: db.close()`` discards the uncommitted transaction, the
+        committed bytes a second session sees are plaintext WITH OR WITHOUT that rollback. The explicit
+        rollback is therefore defense-in-depth, untestable-by-construction under close-rollback (so it
+        carries a comment to that effect in reencrypt_api_keys.py, mirroring the error-path rollback).
+        This test still pins the load-bearing INVARIANT: a previewed sweep persists nothing at rest.
+        """
+        engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        Base.metadata.create_all(engine)
+        Session = sessionmaker(bind=engine)
+
+        seed = Session()
+        seed.add(ApiKey(provider="OPENAI_API_KEY", key_value="sk-plain", is_active=True))
+        seed.commit()
+        seed.close()
+
+        # Each main() call gets its OWN session on the shared connection (matches production: open →
+        # work → close per invocation), so the CLI's ``finally: db.close()`` runs against a real session.
+        import app.backend.scripts.reencrypt_api_keys as cli
+
+        monkeypatch.setattr(cli, "SessionLocal", Session)
+
+        exit_code = cli.main(["--dry-run"])
+        assert exit_code == 0
+
+        # Observe COMMITTED state from a fresh session (its transaction sees only what was committed).
+        observer = Session()
+        try:
+            at_rest = observer.query(ApiKey).filter_by(provider="OPENAI_API_KEY").first().key_value
+        finally:
+            observer.close()
+        assert at_rest == "sk-plain", "dry-run must leave the row plaintext at rest (nothing committed)"
+        assert not at_rest.startswith(TAG), "dry-run must never tag-encrypt at rest"
 
     def test_main_unexpected_error_exits_1_to_stderr_commits_nothing(self, monkeypatch, capsys, session, enc_on):
         """An unexpected error inside the sweep is caught: exit 1, stderr, nothing committed.

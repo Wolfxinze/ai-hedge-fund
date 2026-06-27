@@ -76,6 +76,11 @@ _MAX_TICKERS = 100
 # LENIENTLY — well above the ~18 real ids in ANALYST_CONFIG — so the legitimate "all analysts" case is
 # never rejected; the exact-id allowlist (_validate_selected_analysts) does the real filtering. Kept as
 # a plain literal (NOT len(ANALYST_CONFIG)) so the routes module stays offline-importable at module load.
+# The Field max_length cap yields a GENERIC Pydantic 422 (unlike the hand-rolled actionable messages
+# elsewhere in this file) — that is DELIBERATE: this cap is a backstop the user should never legitimately
+# reach, and the AUTHORITATIVE, message-bearing analyst validation is _validate_selected_analysts (the
+# exact-id allowlist). Do not promote this cap to a custom validator (it would lose #49's offline-importable
+# plain-literal design).
 _MAX_ANALYSTS = 50
 # Cap concurrent manual runs: each run is a synchronous multi-minute analyzing-flow job, so the
 # loopback surface must not be coerced into N parallel storms. cap=2 is lenient — never 429s the

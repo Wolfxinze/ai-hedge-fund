@@ -94,10 +94,14 @@ def test_reschedule_adds_job_for_enabled_monitor(sch, factory):
     assert job.coalesce is True, "missed fires collapse; never pile up"
 
 
-def test_reschedule_removes_job_when_disabled(sch, factory):
+def test_reschedule_removes_job_when_disabled(sch, factory, caplog):
     """reschedule_monitor REMOVES the job when the monitor is disabled.
     WHY: a disabled monitor must stop firing immediately — leaving a stale job would continue
-    consuming LLM/API credits and producing unwanted reports."""
+    consuming LLM/API credits and producing unwanted reports.
+    Also pins (#48) that the happy disarm path is QUIET on the persist-after-remove WARNING: that
+    warning only fires when a job abnormally survives remove_job; a normal disable must not emit it.
+    MUTATION-PROOF: hoisting the warning OUT of its ``if get_job(...) is not None`` guard in
+    scheduler.py (so it logs on every remove) makes the warning-absence assertion below FAIL."""
     mon = _make_monitor(factory, name="disable_me", enabled=True)
 
     # First arm the job
@@ -106,9 +110,11 @@ def test_reschedule_removes_job_when_disabled(sch, factory):
 
     # Now disable and reschedule
     mon.enabled = False
-    reschedule_monitor(sch, mon, session_factory=factory)
+    with caplog.at_level(logging.WARNING, logger="src.scheduler.scheduler"):
+        reschedule_monitor(sch, mon, session_factory=factory)
 
     assert sch.get_job(monitor_job_id(mon.id)) is None, "disabled monitor must have no registered job"
+    assert not any("persist" in r.getMessage() for r in caplog.records), "a normal disable must NOT log the persist-after-remove warning (that fires only on an abnormal surviving job)"
 
 
 def test_reschedule_updates_trigger_on_schedule_change(sch, factory):
@@ -243,3 +249,38 @@ def test_remove_monitor_job_warns_if_job_persists_after_removal(sch, factory, ca
         _remove_monitor_job(sch, mon.id)
 
     assert any("persist" in r.getMessage().lower() and str(job_id) in r.getMessage() for r in caplog.records), "a WARNING must be logged when a job persists after remove_job"
+
+
+def test_remove_monitor_job_logs_info_breadcrumb_on_real_disarm(sch, factory, caplog):
+    """_remove_monitor_job logs a POSITIVE INFO breadcrumb on a REAL disarm but stays QUIET on a
+    no-op remove (#55-A silent disable / #55-B silent stale-job eviction).
+    WHY: a successful disarm must leave an observable trace so ops can confirm a monitor stopped
+    firing, while a no-op remove (no such job) must NOT log it (no false 'disarmed' noise).
+    MUTATION-PROOF: deleting the ``logger.info("scheduler: disarmed job ...")`` line in
+    _remove_monitor_job makes the first assertion FAIL."""
+    from src.scheduler.scheduler import _add_monitor_job, _remove_monitor_job
+
+    mon = _make_monitor(factory, name="disarm_breadcrumb", enabled=True)
+    job_id = monitor_job_id(mon.id)
+
+    _add_monitor_job(
+        sch,
+        monitor_id=mon.id,
+        name=mon.name,
+        schedule="weekly",
+        analyzing_flow=None,
+        session_factory=factory,
+    )
+    assert sch.get_job(job_id) is not None  # pre-condition: job is present
+
+    # REAL disarm: the job exists and is actually removed → must leave a breadcrumb.
+    with caplog.at_level(logging.INFO, logger="src.scheduler.scheduler"):
+        _remove_monitor_job(sch, mon.id)
+    assert sch.get_job(job_id) is None  # genuinely removed
+    assert any("disarmed" in r.getMessage() and str(job_id) in r.getMessage() for r in caplog.records), "a REAL disarm must log the positive 'disarmed job' breadcrumb"
+
+    # NO-OP remove: the job is already gone → must stay quiet (no false 'disarmed' line).
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="src.scheduler.scheduler"):
+        _remove_monitor_job(sch, mon.id)
+    assert not any("disarmed" in r.getMessage() for r in caplog.records), "a no-op remove (job already absent) must NOT log a 'disarmed' breadcrumb"
