@@ -72,9 +72,17 @@ _GRANULARITIES = {g.value for g in Granularity}
 # Upper-bound a watchlist so POST /monitors/{id}/run can't be coerced into a synchronous
 # thousands-of-tickers job (each ticker is a multi-minute analyzing-flow call).
 _MAX_TICKERS = 100
+# Sibling-consistency cap on selected_analysts (mirrors tickers/platform_keys max_length). Set
+# LENIENTLY — well above the ~18 real ids in ANALYST_CONFIG — so the legitimate "all analysts" case is
+# never rejected; the exact-id allowlist (_validate_selected_analysts) does the real filtering. Kept as
+# a plain literal (NOT len(ANALYST_CONFIG)) so the routes module stays offline-importable at module load.
+_MAX_ANALYSTS = 50
 # Cap concurrent manual runs: each run is a synchronous multi-minute analyzing-flow job, so the
 # loopback surface must not be coerced into N parallel storms. cap=2 is lenient — never 429s the
 # legitimate single-user case. A BoundedSemaphore raises if released more than acquired (a leak alarm).
+# Per-request balance is exactly one acquire (run_monitor_endpoint, before the try) ↔ one release (its
+# `finally`); keep it 1:1 so the over-release ValueError — which would mask the in-flight exception it
+# fired under — stays unreachable, and a future double-release refactor is caught in review.
 _MAX_CONCURRENT_RUNS = 2
 _run_semaphore = threading.BoundedSemaphore(_MAX_CONCURRENT_RUNS)
 
@@ -84,7 +92,7 @@ class MonitorCreateRequest(BaseModel):
     tickers: list[str] = Field(min_length=1, max_length=_MAX_TICKERS)
     granularity: str = Granularity.WEEKLY.value
     platform_keys: list[str] | None = None
-    selected_analysts: list[str] | None = None
+    selected_analysts: list[str] | None = Field(default=None, max_length=_MAX_ANALYSTS)
     schedule: str | None = None  # cron/keyword; validated against the #18 floor on the effective schedule
 
 
@@ -97,7 +105,7 @@ class MonitorPatchRequest(BaseModel):
     schedule: str | None = None
     enabled: bool | None = None
     platform_keys: list[str] | None = None
-    selected_analysts: list[str] | None = None
+    selected_analysts: list[str] | None = Field(default=None, max_length=_MAX_ANALYSTS)
 
 
 class MonitorRunRequest(BaseModel):
