@@ -2,6 +2,7 @@ import os
 
 from src.data.providers.base import FinancialDataProvider
 from src.data.providers.financial_datasets import FinancialDatasetsProvider
+from src.data.providers.global_stock_data import GlobalStockDataProvider
 from src.data.providers.yfinance import YFinanceProvider
 
 DEFAULT_PROVIDER_NAME = "yfinance"
@@ -16,6 +17,10 @@ _PROVIDER_ALIASES = {
     "yahoo-finance": "yfinance",
     "yf": "yfinance",
     "yfinance": "yfinance",
+    "globalstockdata": "globalstockdata",
+    "global_stock_data": "globalstockdata",
+    "global-stock-data": "globalstockdata",
+    "gsd": "globalstockdata",
 }
 
 _providers: dict[str, FinancialDataProvider] = {}
@@ -38,6 +43,8 @@ def get_financial_data_provider(provider_name: str | None = None) -> FinancialDa
             _providers[name] = YFinanceProvider()
         elif name == "financialdatasets":
             _providers[name] = FinancialDatasetsProvider()
+        elif name == "globalstockdata":
+            _providers[name] = GlobalStockDataProvider()
         else:
             valid = ", ".join(sorted(set(_PROVIDER_ALIASES.values())))
             raise ValueError(f"Unknown financial data provider '{name}'. Valid providers: {valid}")
