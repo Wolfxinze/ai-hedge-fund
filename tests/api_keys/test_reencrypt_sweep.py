@@ -319,9 +319,18 @@ def enc_on(monkeypatch):
     """Enable KEY_ENCRYPTION and provision a master key via AHF_MASTER_KEY (env path,
     no OS keyring) so the REAL get_cipher() resolves a working Fernet. Clears the
     process-level Fernet cache before and after so tests don't leak a resolved key.
+
+    HERMETIC against a provisioned OS keyring (#62): get_cipher() resolves the keyring
+    FIRST (crypto._resolve_fernet step 1) and only falls through to AHF_MASTER_KEY if it
+    returns None. On a dev machine that already holds a ``master_key`` keyring entry the
+    sweep would encrypt under THAT key while the assertions decrypt with ``_KEY`` — a
+    spurious ``CryptoError: master key mismatch`` (TestCliBehavior::test_main_happy_path
+    fails in isolation). Neutralising ``keyring.get_password`` forces the deterministic env
+    path regardless of host keyring state; the seam is re-read at call time so this holds.
     """
     monkeypatch.setenv("KEY_ENCRYPTION", "on")
     monkeypatch.setenv("AHF_MASTER_KEY", _KEY.decode())
+    monkeypatch.setattr("keyring.get_password", lambda *a, **k: None)
     reset_crypto_cache()
     yield
     reset_crypto_cache()

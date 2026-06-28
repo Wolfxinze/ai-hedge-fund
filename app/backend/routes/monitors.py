@@ -81,6 +81,10 @@ _MAX_TICKERS = 100
 # reach, and the AUTHORITATIVE, message-bearing analyst validation is _validate_selected_analysts (the
 # exact-id allowlist). Do not promote this cap to a custom validator (it would lose #49's offline-importable
 # plain-literal design).
+# Observable 422 shape when exceeded (#62), Pydantic v2 ``too_long``: the client receives
+#   detail=[{"type": "too_long", "loc": ["body", "selected_analysts"],
+#            "msg": "List should have at most 50 items after validation, not <n>"}]
+# — field-located but with NO analyst-id specifics (those come only from _validate_selected_analysts).
 _MAX_ANALYSTS = 50
 # Cap concurrent manual runs: each run is a synchronous multi-minute analyzing-flow job, so the
 # loopback surface must not be coerced into N parallel storms. cap=2 is lenient — never 429s the

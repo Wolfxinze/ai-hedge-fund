@@ -100,6 +100,9 @@ def test_reschedule_removes_job_when_disabled(sch, factory, caplog):
     consuming LLM/API credits and producing unwanted reports.
     Also pins (#48) that the happy disarm path is QUIET on the persist-after-remove WARNING: that
     warning only fires when a job abnormally survives remove_job; a normal disable must not emit it.
+    Scope note (#62): this test asserts only the WARNING's absence; the COMPLEMENTARY positive INFO
+    "disarmed" breadcrumb on a real disarm is pinned separately by
+    test_remove_monitor_job_logs_info_breadcrumb_on_real_disarm.
     MUTATION-PROOF: hoisting the warning OUT of its ``if get_job(...) is not None`` guard in
     scheduler.py (so it logs on every remove) makes the warning-absence assertion below FAIL."""
     mon = _make_monitor(factory, name="disable_me", enabled=True)
