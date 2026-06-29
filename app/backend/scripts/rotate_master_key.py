@@ -71,7 +71,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     db = SessionLocal()
     try:
-        old_fernet = resolve_master_fernet(db)
+        old_fernet = resolve_master_fernet()
         new_fernet = build_fernet(new_key, source=_NEW_KEY_ENV)
 
         if args.dry_run:
@@ -84,9 +84,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             result = rotate_api_key_master(db, old_fernet=old_fernet, new_fernet=new_fernet, commit=True)
             print(f"scanned={result.scanned} rotated={result.rotated} " f"skipped_plaintext={result.skipped_plaintext} skipped_empty={result.skipped_empty}")
-            # Next-steps: the DB rows are now under the new key, but the resolved master is still the
-            # old one for any running process. The operator must repoint the key source and restart.
-            print(f"rotation complete — now repoint the master key (OS keyring item 'master_key' or " f"AHF_MASTER_KEY) to the {_NEW_KEY_ENV} value and restart; the old key can then be retired.")
+            if result.rotated:
+                # Next-steps: the DB rows are now under the new key, but the resolved master is still
+                # the old one for any running process. The operator must repoint the source + restart.
+                print(f"rotation complete — now repoint the master key (OS keyring item 'master_key' or " f"AHF_MASTER_KEY) to the {_NEW_KEY_ENV} value and restart; the old key can then be retired.")
+            else:
+                # Nothing was re-keyed — do NOT advise retiring the old key (a no-op on this DB); that
+                # would erode trust in the message for the run that actually rotates rows.
+                print("no encrypted rows were rotated — nothing to repoint (run the re-encrypt sweep first if rows are still plaintext).")
     except Exception as exc:
         # Fail loud with the error TYPE + message (not a bare str) so a CryptoError (wrong/malformed
         # key) is distinguishable from, say, an OperationalError at a glance.

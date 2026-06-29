@@ -39,7 +39,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.backend.database.connection import Base
 from app.backend.database.models import ApiKey
-from app.backend.services.crypto import CryptoError, TAG, reset_crypto_cache
+from app.backend.services.crypto import CryptoError, CryptoMasterKeyError, TAG, _resolve_fernet, reset_crypto_cache, resolve_master_fernet
 
 
 # ── three distinct keys: OLD (current master), NEW (rotation target), WRONG (mismatch) ──
@@ -181,6 +181,122 @@ class TestRotateApiKeyMaster:
         # NOT a NEW-key token. (Byte-identity is the cleanest proof the mutation was reverted.)
         assert _raw(session, "GOOD_KEY") == good_before, "earlier rotation must be rolled back, not left half-applied"
         assert _decrypts_to(_OLD_KEY, _raw(session, "GOOD_KEY")) == "sk-good", "good row must still decrypt under the OLD key"
+
+    def test_same_key_rotation_refuses_loud_and_touches_nothing(self, session):
+        """If the NEW key equals the OLD key, rotation refuses loudly (CryptoError) instead of a
+        silent no-op that re-keys nothing yet reports success.
+
+        Fernet is non-deterministic, so re-encrypting under the same key changes the stored bytes
+        and would LOOK like a successful rotation while the OLD key still decrypts every row. For a
+        rotation triggered by a suspected key compromise that is the worst outcome — the operator
+        retires the only key while the "rotated" rows remain readable by it. So we refuse up front.
+        """
+        _insert_raw(session, "OPENAI_API_KEY", _enc(_OLD_KEY, "sk-secret"))
+        before = _raw(session, "OPENAI_API_KEY")
+
+        with pytest.raises(CryptoError, match="identical"):
+            rotate_api_key_master(session, old_fernet=Fernet(_OLD_KEY), new_fernet=Fernet(_OLD_KEY))
+
+        assert _raw(session, "OPENAI_API_KEY") == before, "a refused same-key rotation must touch nothing"
+        assert _decrypts_to(_OLD_KEY, _raw(session, "OPENAI_API_KEY")) == "sk-secret"
+
+    def test_each_of_multiple_encrypted_rows_rotates_to_its_own_secret(self, session):
+        """Two DISTINCT encrypted rows each rotate to the NEW key preserving their OWN secret.
+
+        The single-row tests cannot catch a loop bug that rotates only the first row, or reuses one
+        row's plaintext for another. This pins the actual fleet job: N rows re-keyed independently.
+        """
+        _insert_raw(session, "OPENAI_API_KEY", _enc(_OLD_KEY, "sk-alpha"))
+        _insert_raw(session, "ANTHROPIC_API_KEY", _enc(_OLD_KEY, "sk-beta"))
+
+        result = rotate_api_key_master(session, old_fernet=Fernet(_OLD_KEY), new_fernet=Fernet(_NEW_KEY))
+
+        assert result.rotated == 2
+        assert _decrypts_to(_NEW_KEY, _raw(session, "OPENAI_API_KEY")) == "sk-alpha"
+        assert _decrypts_to(_NEW_KEY, _raw(session, "ANTHROPIC_API_KEY")) == "sk-beta"
+        # Non-vacuity: the OLD key can no longer decrypt either rotated token.
+        with pytest.raises(InvalidToken):
+            _decrypts_to(_OLD_KEY, _raw(session, "OPENAI_API_KEY"))
+        with pytest.raises(InvalidToken):
+            _decrypts_to(_OLD_KEY, _raw(session, "ANTHROPIC_API_KEY"))
+
+    def test_inactive_encrypted_row_is_rotated_not_orphaned(self, session):
+        """A disabled (``is_active=False``) encrypted row IS rotated — it must not be orphaned under
+        the retired old key. Pins that rotation scans ALL rows: a future ``is_active`` filter that
+        skipped disabled rows would silently make them unrecoverable after the old key is retired —
+        this test would go RED.
+        """
+        session.add(ApiKey(provider="OPENAI_API_KEY", key_value=_enc(_OLD_KEY, "sk-inactive"), is_active=False))
+        session.commit()
+
+        result = rotate_api_key_master(session, old_fernet=Fernet(_OLD_KEY), new_fernet=Fernet(_NEW_KEY))
+
+        assert result.rotated == 1, "an inactive encrypted row must be rotated, not skipped"
+        assert _decrypts_to(_NEW_KEY, _raw(session, "OPENAI_API_KEY")) == "sk-inactive"
+
+    def test_chained_rotation_old_to_new_to_newer(self, session):
+        """Rotation output is itself rotatable: OLD->NEW then NEW->NEWER yields a row readable only by
+        NEWER. Pins the realistic repeated-rotation path (operators re-run rotation over time).
+        """
+        newer_key = Fernet.generate_key()
+        _insert_raw(session, "OPENAI_API_KEY", _enc(_OLD_KEY, "sk-secret"))
+
+        rotate_api_key_master(session, old_fernet=Fernet(_OLD_KEY), new_fernet=Fernet(_NEW_KEY))
+        result = rotate_api_key_master(session, old_fernet=Fernet(_NEW_KEY), new_fernet=Fernet(newer_key))
+
+        assert result.rotated == 1
+        assert _decrypts_to(newer_key, _raw(session, "OPENAI_API_KEY")) == "sk-secret"
+        with pytest.raises(InvalidToken):
+            _decrypts_to(_NEW_KEY, _raw(session, "OPENAI_API_KEY"))
+
+
+# ── ROTATION RESOLVER: NEVER PROVISIONS ──────────────────────────────────────
+class TestResolveMasterFernetNeverProvisions:
+    """Rotation's resolver must NEVER mint a master key (silent-failure-hunter #25 BLOCK).
+
+    Provisioning a fresh "current" key during a rotation would re-key zero rows yet report success,
+    and the operator would retire a key nothing was migrated off.
+    """
+
+    def test_resolve_fernet_provision_false_fails_loud_without_minting(self):
+        """``provision=False`` must NOT generate or store a key even when the 'no encrypted rows'
+        probe (the normal first-run provisioning trigger) returns False — it must raise.
+
+        Non-vacuity: WITHOUT the guard, ``has_encrypted_rows=lambda: False`` + an available keyring
+        backend reaches Step-3 provisioning, which would call ``generate_key`` and ``keyring_set``.
+        The spies prove neither fires.
+        """
+        minted = []
+
+        def _spy_generate():
+            minted.append("generated")
+            return Fernet.generate_key()
+
+        reset_crypto_cache()
+        try:
+            with pytest.raises(CryptoMasterKeyError):
+                _resolve_fernet(
+                    keyring_get=lambda *a, **k: None,
+                    keyring_set=lambda *a, **k: minted.append("stored"),
+                    env_get=lambda _name: None,
+                    has_encrypted_rows=lambda: False,  # the provisioning trigger — must be ignored
+                    generate_key=_spy_generate,
+                    provision=False,
+                )
+            assert minted == [], "provision=False must neither generate nor store a master key"
+        finally:
+            reset_crypto_cache()
+
+    def test_resolve_master_fernet_public_seam_fails_loud_when_unprovisioned(self, monkeypatch):
+        """The public rotation resolver fails loud when no key resolves (keyring empty + env unset)."""
+        monkeypatch.delenv("AHF_MASTER_KEY", raising=False)
+        monkeypatch.setattr("keyring.get_password", lambda *a, **k: None)
+        reset_crypto_cache()
+        try:
+            with pytest.raises(CryptoMasterKeyError):
+                resolve_master_fernet()
+        finally:
+            reset_crypto_cache()
 
 
 # ── CLI GUARD TESTS ───────────────────────────────────────────────────────────
@@ -372,3 +488,63 @@ class TestRotateCliBehavior:
         assert "RuntimeError" in err
         assert "Traceback (most recent call last)" in err
         assert "_boom" in err
+
+    def test_main_new_key_identical_to_old_exits_1_and_does_not_advise_retire(self, monkeypatch, capsys, session, rot_on):
+        """If AHF_MASTER_KEY_NEW equals the current master, main() refuses loud (exit 1, 'identical'
+        + 'no rows committed') and never prints the 'retire the old key' guidance — a same-key
+        rotation re-keys nothing while otherwise reporting success.
+        """
+        monkeypatch.setenv("AHF_MASTER_KEY_NEW", _OLD_KEY.decode())  # new == old
+        _insert_raw(session, "OPENAI_API_KEY", _enc(_OLD_KEY, "sk-secret"))
+        before = _raw(session, "OPENAI_API_KEY")
+        cli = _wire_session_local(monkeypatch, session)
+
+        exit_code = cli.main([])
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "identical" in captured.err
+        assert "no rows committed" in captured.err
+        assert captured.out == "", "a refused same-key rotation must print no success/retire line"
+        assert _raw(session, "OPENAI_API_KEY") == before, "a same-key rotation must touch nothing"
+
+    def test_main_zero_rotated_prints_nothing_to_repoint_not_retire(self, monkeypatch, capsys, session, rot_on):
+        """A real run that rotates nothing (only plaintext rows) must NOT advise retiring the old key;
+        it prints an explicit 'nothing to repoint' instead (the message is decoupled from rotated=0).
+        """
+        _insert_raw(session, "PLAIN_KEY", "sk-plain")  # untagged → skipped_plaintext, rotated=0
+        cli = _wire_session_local(monkeypatch, session)
+
+        exit_code = cli.main([])
+
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "rotated=0" in out
+        assert "nothing to repoint" in out
+        assert "retire" not in out, "must not advise retiring the old key when nothing was rotated"
+
+    def test_main_unprovisioned_master_never_mints_exits_1(self, monkeypatch, capsys, session):
+        """KEY_ENCRYPTION on + AHF_MASTER_KEY_NEW set but NO current master (keyring empty + env
+        unset): main() must fail loud (exit 1, CryptoMasterKeyError, 'no rows committed') and never
+        provision a master key as a side effect of a rotation.
+        """
+        monkeypatch.setenv("KEY_ENCRYPTION", "on")
+        monkeypatch.setenv("AHF_MASTER_KEY_NEW", _NEW_KEY.decode())
+        monkeypatch.delenv("AHF_MASTER_KEY", raising=False)
+        monkeypatch.setattr("keyring.get_password", lambda *a, **k: None)
+        provisioned = []
+        monkeypatch.setattr("keyring.set_password", lambda *a, **k: provisioned.append(a))
+        reset_crypto_cache()
+        _insert_raw(session, "OPENAI_API_KEY", _enc(_OLD_KEY, "sk-secret"))
+        cli = _wire_session_local(monkeypatch, session)
+        try:
+            exit_code = cli.main([])
+        finally:
+            reset_crypto_cache()
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "CryptoMasterKeyError" in captured.err
+        assert "no rows committed" in captured.err
+        assert captured.out == ""
+        assert provisioned == [], "rotation must never provision (write) a master key"

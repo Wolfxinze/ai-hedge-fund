@@ -95,6 +95,7 @@ def _resolve_fernet(
     env_get: Callable[[str], str | None] = None,
     has_encrypted_rows: Callable[[], bool],
     generate_key: Callable[[], bytes] = Fernet.generate_key,
+    provision: bool = True,
 ) -> Fernet:
     """Resolve the master Fernet via keyring -> env -> first-run provision -> loud fail.
 
@@ -102,6 +103,9 @@ def _resolve_fernet(
     resolution order is unit-testable with no OS keyring and no DB. Result is cached.
     ``has_encrypted_rows`` is the ONLY guard distinguishing genuine-first-run (safe to
     generate) from lost-key (must fail, never orphan data); it MUST fail closed.
+    ``provision=False`` (used by key rotation) skips first-run minting entirely: if neither
+    the keyring nor the env resolves a key it fails loud instead of generating one — a
+    rotation must operate on an EXISTING master, never invent one.
     """
     global _FERNET_CACHE
     if _FERNET_CACHE is not None:
@@ -124,6 +128,13 @@ def _resolve_fernet(
     if env_key:
         _FERNET_CACHE = _build_fernet(env_key, source="AHF_MASTER_KEY")
         return _FERNET_CACHE
+
+    # Rotation (provision=False) resolves an EXISTING master only — never mint one. If neither the
+    # keyring nor AHF_MASTER_KEY produced a key, fail loud here rather than running first-run
+    # provisioning: a minted key would "rotate" zero rows yet report success, and the operator
+    # would then retire a key the new one never replaced.
+    if not provision:
+        raise CryptoMasterKeyError(f"no current master key found (OS keyring item {_KEYRING_ITEM!r} in namespace {keyring_namespace()!r}, or AHF_MASTER_KEY). " "Rotation re-keys EXISTING encrypted rows and never provisions a master key — restore the current key, then rotate.")
 
     # Step 3 — first-run provisioning, gated on "no encrypted rows exist". Fail closed:
     # if the probe errors we assume rows may exist and refuse to generate.
@@ -201,12 +212,14 @@ def get_cipher(db) -> KeyCipher:
     )
 
 
-def resolve_master_fernet(db) -> Fernet:
-    """Resolve the CURRENT (old) master Fernet for rotation — keyring -> env -> provision ->
-    loud fail, the SAME order as ``get_cipher``. Returns the resolved Fernet object directly
-    (not wrapped in a ``KeyCipher``) so rotation can decrypt existing rows with the OLD key
-    while a separately-built NEW Fernet (``build_fernet``) re-encrypts them. Shares the process
-    cache, exactly like ``get_cipher`` — the resolved key is the master that wrote the rows."""
-    from app.backend.repositories.api_key_repository import ApiKeyRepository
+def resolve_master_fernet() -> Fernet:
+    """Resolve the CURRENT (old) master Fernet for rotation — keyring -> env -> loud fail.
 
-    return _resolve_fernet(has_encrypted_rows=lambda: ApiKeyRepository(db).has_encrypted_rows())
+    UNLIKE ``get_cipher``, rotation NEVER provisions (``provision=False``): a run on a host with no
+    resolvable master key fails loud rather than minting a brand-new key that would "rotate" zero
+    rows while reporting success (the operator would then retire a key nothing was migrated off).
+    Returns the resolved Fernet directly (not wrapped in a ``KeyCipher``) so rotation can decrypt
+    existing rows with the OLD key while a separately-built NEW Fernet (``build_fernet``) re-encrypts
+    them. Shares the process cache, exactly like ``get_cipher`` — the resolved key wrote the rows."""
+    # has_encrypted_rows is never consulted under provision=False (we fail before the row probe).
+    return _resolve_fernet(has_encrypted_rows=lambda: True, provision=False)

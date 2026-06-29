@@ -178,9 +178,25 @@ def rotate_api_key_master(
     Raises
     ------
     CryptoError
-        If a tagged row fails to decrypt under ``old_fernet`` (wrong key / corrupt ciphertext) —
-        the rotation is rolled back rather than leaving rows split across two keys.
+        If ``new_fernet`` is identical to ``old_fernet`` (refused up front — a same-key rotation
+        would re-key nothing while reporting success), OR if a tagged row fails to decrypt under
+        ``old_fernet`` (wrong key / corrupt ciphertext) — the rotation is rolled back rather than
+        leaving rows split across two keys.
     """
+    # Refuse a no-op rotation: if the NEW key is identical to the OLD one, re-encrypting still
+    # changes the stored bytes (Fernet is non-deterministic), so it LOOKS like a successful rotation
+    # while the OLD key still decrypts every row. For a rotation triggered by a suspected key
+    # compromise that is the worst outcome — the operator retires the "old" key believing the secrets
+    # moved off it, when they did not. Detect identity via a public-API probe (no Fernet internals):
+    # a token minted by NEW decrypts under OLD iff the two share key material.
+    try:
+        old_fernet.decrypt(new_fernet.encrypt(b""))
+        keys_identical = True
+    except InvalidToken:
+        keys_identical = False
+    if keys_identical:
+        raise CryptoError("the new master key is identical to the current master key — rotation would re-key nothing while reporting success; supply a DIFFERENT AHF_MASTER_KEY_NEW.")
+
     scanned = 0
     rotated = 0
     skipped_plaintext = 0
