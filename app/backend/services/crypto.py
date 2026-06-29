@@ -80,6 +80,14 @@ def _build_fernet(key: str, *, source: str) -> Fernet:
         raise CryptoMasterKeyError(f"{source} is set but malformed; expected a Fernet.generate_key() value (44-char urlsafe base64).") from exc
 
 
+def build_fernet(key: str, *, source: str) -> Fernet:
+    """Public seam: build a Fernet from an EXPLICIT key string, with the same loud
+    malformed-key error as master-key resolution. Used by key rotation to construct the
+    NEW-key cipher (e.g. from ``AHF_MASTER_KEY_NEW``). Deliberately does NOT touch the
+    process Fernet cache — the new key must stay independent of the resolved old key."""
+    return _build_fernet(key, source=source)
+
+
 def _resolve_fernet(
     *,
     keyring_get: Callable[[str, str], str | None] = None,
@@ -137,21 +145,13 @@ def _resolve_fernet(
         # WITHOUT the key in the exception message — so no `str(exc)` / HTTP-500 body can
         # ever transport the master key (the message points to the server log instead).
         logger.error(
-            "KEY_ENCRYPTION first run with no OS keyring backend and no AHF_MASTER_KEY. A new master "
-            "key was generated; set AHF_MASTER_KEY to the following value and restart: %s", new_key,
+            "KEY_ENCRYPTION first run with no OS keyring backend and no AHF_MASTER_KEY. A new master " "key was generated; set AHF_MASTER_KEY to the following value and restart: %s",
+            new_key,
         )
-        raise CryptoMasterKeyError(
-            "KEY_ENCRYPTION is on but no OS keyring backend is available and AHF_MASTER_KEY is unset. "
-            "A new master key was generated and written to the server log — set AHF_MASTER_KEY to that "
-            "value and restart."
-        )
+        raise CryptoMasterKeyError("KEY_ENCRYPTION is on but no OS keyring backend is available and AHF_MASTER_KEY is unset. " "A new master key was generated and written to the server log — set AHF_MASTER_KEY to that " "value and restart.")
 
     # Step 4 — encrypted rows exist but no key resolved: loud, terminal (never generate).
-    raise CryptoMasterKeyError(
-        "KEY_ENCRYPTION is on and encrypted API keys exist, but no master key was found. "
-        f"Restore it via the OS keyring (namespace {keyring_namespace()!r}, item {_KEYRING_ITEM!r}) "
-        "or set AHF_MASTER_KEY=<your Fernet key>. Without the original key these rows are unrecoverable."
-    )
+    raise CryptoMasterKeyError("KEY_ENCRYPTION is on and encrypted API keys exist, but no master key was found. " f"Restore it via the OS keyring (namespace {keyring_namespace()!r}, item {_KEYRING_ITEM!r}) " "or set AHF_MASTER_KEY=<your Fernet key>. Without the original key these rows are unrecoverable.")
 
 
 # ── the cipher used by the repository (encrypt) and service (decrypt) ────────
@@ -183,7 +183,7 @@ class KeyCipher:
         if not stored.startswith(TAG):
             return stored
         try:
-            return self._fernet_handle().decrypt(stored[len(TAG):].encode()).decode()
+            return self._fernet_handle().decrypt(stored[len(TAG) :].encode()).decode()
         except InvalidToken as exc:
             raise CryptoError("could not decrypt a stored API key: master key mismatch or corrupted ciphertext.") from exc
 
@@ -199,3 +199,14 @@ def get_cipher(db) -> KeyCipher:
         enabled=is_encryption_enabled(),
         fernet_provider=lambda: _resolve_fernet(has_encrypted_rows=lambda: ApiKeyRepository(db).has_encrypted_rows()),
     )
+
+
+def resolve_master_fernet(db) -> Fernet:
+    """Resolve the CURRENT (old) master Fernet for rotation — keyring -> env -> provision ->
+    loud fail, the SAME order as ``get_cipher``. Returns the resolved Fernet object directly
+    (not wrapped in a ``KeyCipher``) so rotation can decrypt existing rows with the OLD key
+    while a separately-built NEW Fernet (``build_fernet``) re-encrypts them. Shares the process
+    cache, exactly like ``get_cipher`` — the resolved key is the master that wrote the rows."""
+    from app.backend.repositories.api_key_repository import ApiKeyRepository
+
+    return _resolve_fernet(has_encrypted_rows=lambda: ApiKeyRepository(db).has_encrypted_rows())
