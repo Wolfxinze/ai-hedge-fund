@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from cryptography.fernet import Fernet, InvalidToken
 from sqlalchemy.orm import Session
 
 from app.backend.database.models import ApiKey
@@ -103,10 +104,7 @@ def reencrypt_plaintext_api_keys(
                 # misconfigured cipher returns the plaintext unchanged — fail loud rather than
                 # increment a phantom ``upgraded`` count, so the count is load-bearing.
                 if not encrypted.startswith(TAG):
-                    raise CryptoError(
-                        f"re-encrypt produced an untagged value for provider={row.provider!r}; "
-                        "cipher is disabled or misconfigured — refusing to report a false upgrade"
-                    )
+                    raise CryptoError(f"re-encrypt produced an untagged value for provider={row.provider!r}; " "cipher is disabled or misconfigured — refusing to report a false upgrade")
                 row.key_value = encrypted
                 upgraded += 1
 
@@ -122,5 +120,119 @@ def reencrypt_plaintext_api_keys(
         scanned=scanned,
         upgraded=upgraded,
         skipped_encrypted=skipped_encrypted,
+        skipped_empty=skipped_empty,
+    )
+
+
+@dataclass(frozen=True)
+class RotateResult:
+    """Immutable summary of a master-key rotation run."""
+
+    scanned: int
+    rotated: int
+    skipped_plaintext: int
+    skipped_empty: int
+
+
+def rotate_api_key_master(
+    db: Session,
+    *,
+    old_fernet: Fernet,
+    new_fernet: Fernet,
+    commit: bool = True,
+) -> RotateResult:
+    """Re-encrypt every ``enc:v1:`` ``ApiKey.key_value`` row from ``old_fernet`` to ``new_fernet``.
+
+    Rotation is a pure key swap: each already-encrypted row is decrypted with the OLD key and
+    re-encrypted with the NEW key, keeping the ``enc:v1:`` tag (the Fernet algorithm is unchanged,
+    so there is no ``enc:v2:`` format bump — issue #25, decision 2026-06-28).
+
+    Parameters
+    ----------
+    db:
+        A SQLAlchemy session. The caller owns its lifecycle.
+    old_fernet:
+        The CURRENT master key's Fernet — must decrypt the existing tokens. A wrong key trips a
+        loud ``CryptoError`` and the whole rotation rolls back (never re-encrypts ciphertext it
+        could not decrypt). Obtain it via ``crypto.resolve_master_fernet``.
+    new_fernet:
+        The rotation-target Fernet, built explicitly from the new key (``crypto.build_fernet``)
+        so it is independent of the process Fernet cache that still holds the old key.
+    commit:
+        When ``True`` (default) a single ``db.commit()`` is issued at the end — all rows rotate or
+        none do. When ``False`` the session is left dirty for the caller to inspect/rollback (the
+        dry-run path).
+
+    Returns
+    -------
+    RotateResult
+        Exact counts for each bucket:
+        - ``scanned``: total rows examined.
+        - ``rotated``: ``enc:v1:`` rows re-encrypted from the old key to the new key.
+        - ``skipped_plaintext``: untagged rows left untouched — rotation only re-keys already
+          encrypted rows; plaintext migration is the SWEEP's job (``reencrypt_plaintext_api_keys``).
+        - ``skipped_empty``: rows with an empty/falsy ``key_value`` (not touched).
+
+        Invariant: ``scanned == rotated + skipped_plaintext + skipped_empty``.
+
+    Raises
+    ------
+    CryptoError
+        If ``new_fernet`` is identical to ``old_fernet`` (refused up front — a same-key rotation
+        would re-key nothing while reporting success), OR if a tagged row fails to decrypt under
+        ``old_fernet`` (wrong key / corrupt ciphertext) — the rotation is rolled back rather than
+        leaving rows split across two keys.
+    """
+    # Refuse a no-op rotation: if the NEW key is identical to the OLD one, re-encrypting still
+    # changes the stored bytes (Fernet is non-deterministic), so it LOOKS like a successful rotation
+    # while the OLD key still decrypts every row. For a rotation triggered by a suspected key
+    # compromise that is the worst outcome — the operator retires the "old" key believing the secrets
+    # moved off it, when they did not. Detect identity via a public-API probe (no Fernet internals):
+    # a token minted by NEW decrypts under OLD iff the two share key material.
+    try:
+        old_fernet.decrypt(new_fernet.encrypt(b""))
+        keys_identical = True
+    except InvalidToken:
+        keys_identical = False
+    if keys_identical:
+        raise CryptoError("the new master key is identical to the current master key — rotation would re-key nothing while reporting success; supply a DIFFERENT AHF_MASTER_KEY_NEW.")
+
+    scanned = 0
+    rotated = 0
+    skipped_plaintext = 0
+    skipped_empty = 0
+
+    try:
+        for row in db.query(ApiKey).all():
+            scanned += 1
+            if not row.key_value:
+                skipped_empty += 1
+            elif not row.key_value.startswith(TAG):
+                # Untagged plaintext is the SWEEP's domain — never silently encrypt it during a
+                # rotation (that would conflate two distinct operations and surprise the operator).
+                skipped_plaintext += 1
+            else:
+                token = row.key_value[len(TAG) :].encode()
+                try:
+                    plaintext = old_fernet.decrypt(token)
+                except InvalidToken as exc:
+                    # Loud + terminal: a row we cannot decrypt with the OLD key must abort the whole
+                    # rotation (rolled back below), never be "re-encrypted" as raw ciphertext.
+                    raise CryptoError(f"could not decrypt a stored API key during rotation for provider={row.provider!r}: " "old master key mismatch or corrupted ciphertext — refusing to rotate.") from exc
+                row.key_value = TAG + new_fernet.encrypt(plaintext).decode()
+                rotated += 1
+
+        if commit:
+            db.commit()
+    except Exception:
+        # All-or-nothing: any failure must not leave rows split across the old and new keys
+        # (both tagged enc:v1:, indistinguishable). Roll the whole rotation back, then re-raise.
+        db.rollback()
+        raise
+
+    return RotateResult(
+        scanned=scanned,
+        rotated=rotated,
+        skipped_plaintext=skipped_plaintext,
         skipped_empty=skipped_empty,
     )
