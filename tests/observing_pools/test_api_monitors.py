@@ -868,3 +868,118 @@ def test_patch_cadence_change_replaces_not_duplicates_live_job(env_with_started_
     assert len(matching) == 1, "a cadence change must REPLACE the job (no duplicate accumulation)"
     trigger_after = str(env_with_started_scheduler.sch.get_job(job_id).trigger)
     assert trigger_after != trigger_before, "the live trigger must reflect the NEW cadence after PATCH"
+
+
+# ── DELETE /monitors/{id} (§14) ──────────────────────────────────────────────────────────────────
+# SOFT delete: the row PERSISTS with enabled=False (reports reference it; the DB enabled-guard is
+# authoritative), and the live scheduler job is disarmed. 404 only on unknown id; idempotent (a second
+# DELETE of an already-disabled monitor is still 204); best-effort when the scheduler is absent.
+
+
+def test_delete_monitor_soft_deletes_row(env):
+    """DELETE returns 204 and the row PERSISTS with enabled=False (soft delete, not a hard row drop).
+    WHY: opportunity reports reference the monitor; the row must survive so history stays intact, and
+    the DB enabled-guard (authoritative) keeps it from firing."""
+    mid = env.client.post("/monitors", json={"name": "to_delete", "tickers": ["NVDA"]}).json()["id"]
+    r = env.client.delete(f"/monitors/{mid}")
+    assert r.status_code == 204
+    with contextlib.closing(env.SessionLocal()) as s:
+        row = s.get(MonitorConfig, mid)
+        assert row is not None, "soft delete must NOT drop the row"
+        assert row.enabled is False, "soft delete must leave the row disabled"
+
+
+def test_delete_unknown_monitor_404(env):
+    """DELETE of an unknown id is 404 (distinct from the 204 no-op on an already-disabled monitor)."""
+    assert env.client.delete("/monitors/9999").status_code == 404
+
+
+def test_delete_monitor_is_idempotent(env):
+    """A second DELETE of the same (already soft-deleted) monitor is still 204, not 404.
+    WHY: the row still exists after the first delete, so the operation is a safe no-op — idempotent."""
+    mid = env.client.post("/monitors", json={"name": "twice", "tickers": ["NVDA"]}).json()["id"]
+    assert env.client.delete(f"/monitors/{mid}").status_code == 204
+    assert env.client.delete(f"/monitors/{mid}").status_code == 204
+
+
+def test_delete_monitor_disarms_live_job(env_with_started_scheduler):
+    """DELETE removes the live scheduler job (real before/after on a RUNNING scheduler).
+    WHY: a soft-deleted monitor must stop firing immediately — same disarm guarantee as PATCH
+    enabled=False, validated against a started job store as in production."""
+    mid = env_with_started_scheduler.client.post("/monitors", json={"name": "del_live", "tickers": ["NVDA"]}).json()["id"]
+    job_id = monitor_job_id(mid)
+    assert env_with_started_scheduler.sch.get_job(job_id) is not None  # armed on create
+    assert env_with_started_scheduler.client.delete(f"/monitors/{mid}").status_code == 204
+    assert env_with_started_scheduler.sch.get_job(job_id) is None, "DELETE must remove the live job"
+
+
+def test_delete_monitor_no_scheduler_still_204(monkeypatch):
+    """DELETE returns 204 and soft-deletes even when app.state.scheduler is None (best-effort disarm).
+    WHY: the DB write is the source of truth; the scheduler disarm is a best-effort side effect that
+    must never fail the delete (mirrors POST/PATCH under a None scheduler)."""
+    monkeypatch.delenv("OBSERVING_POOL_REFRESH_CRON", raising=False)
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    m.Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    def override_get_db():
+        s = Session()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app = FastAPI()
+    app.include_router(monitors_router)
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_analyzing_flow] = lambda: _ok_flow()
+    app.state.scheduler = None  # simulate scheduler start failure
+
+    client = TestClient(app)
+    mid = client.post("/monitors", json={"name": "no_sch_del", "tickers": ["NVDA"]}).json()["id"]
+    r = client.delete(f"/monitors/{mid}")
+    assert r.status_code == 204, "DELETE must return 204 even when app.state.scheduler is None"
+    with contextlib.closing(Session()) as s:
+        assert s.get(MonitorConfig, mid).enabled is False
+
+
+# ── GET /monitors/{id} (§14) ─────────────────────────────────────────────────────────────────────
+# Single-monitor read mirroring get_report in observing_pools.py: 200 via _monitor_to_dict, 404 on
+# unknown. Read-only — no commit, no reschedule — and it must NOT shadow the GET /monitors list route.
+
+
+def test_get_single_monitor_returns_it(env):
+    """GET /monitors/{id} returns the single monitor's dict (same shape as the list rows)."""
+    mid = env.client.post("/monitors", json={"name": "readme", "tickers": ["NVDA"], "granularity": "weekly"}).json()["id"]
+    r = env.client.get(f"/monitors/{mid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == mid and body["name"] == "readme" and body["tickers"] == ["NVDA"]
+
+
+def test_get_single_unknown_404(env):
+    """GET of an unknown monitor id is 404."""
+    assert env.client.get("/monitors/9999").status_code == 404
+
+
+def test_get_single_does_not_shadow_list(env):
+    """GET /monitors still returns a LIST (not shadowed by the single-monitor route), and
+    GET /monitors/{id} returns a single dict. WHY: the collection and item routes must coexist."""
+    a = env.client.post("/monitors", json={"name": "one", "tickers": ["NVDA"]}).json()["id"]
+    b = env.client.post("/monitors", json={"name": "two", "tickers": ["AMD"]}).json()["id"]
+    listed = env.client.get("/monitors")
+    assert listed.status_code == 200 and isinstance(listed.json(), list)
+    assert {a, b}.issubset({row["id"] for row in listed.json()})
+    single = env.client.get(f"/monitors/{a}")
+    assert single.status_code == 200 and isinstance(single.json(), dict)
+
+
+def test_get_single_monitor_is_read_only(env_with_started_scheduler):
+    """GET /monitors/{id} does NOT reschedule or mutate: the live job is untouched after a read.
+    WHY: a read must be free of side effects — no disarm/re-arm, no commit."""
+    mid = env_with_started_scheduler.client.post("/monitors", json={"name": "ro_read", "tickers": ["NVDA"]}).json()["id"]
+    job_id = monitor_job_id(mid)
+    assert env_with_started_scheduler.sch.get_job(job_id) is not None
+    assert env_with_started_scheduler.client.get(f"/monitors/{mid}").status_code == 200
+    assert env_with_started_scheduler.sch.get_job(job_id) is not None, "a read must not disarm the live job"

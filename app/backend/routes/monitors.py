@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from datetime import date, datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -295,6 +295,39 @@ def patch_monitor_endpoint(
     db.refresh(monitor)
     _safe_reschedule(scheduler, monitor)
     return _monitor_to_dict(monitor)
+
+
+@router.get("/monitors/{monitor_id}")
+def get_monitor_endpoint(monitor_id: int, db: Session = Depends(get_db)) -> dict:
+    """Single-monitor read (§14), mirroring ``get_report`` in observing_pools.py. Read-only: no commit,
+    no reschedule — a GET must be side-effect free. 404 when the id is unknown. Registered AFTER
+    ``GET /monitors`` so the literal collection route still matches ``/monitors`` (no shadowing)."""
+    monitor = db.get(MonitorConfig, monitor_id)
+    if monitor is None:
+        raise HTTPException(status_code=404, detail=f"monitor {monitor_id} not found")
+    return _monitor_to_dict(monitor)
+
+
+@router.delete("/monitors/{monitor_id}", status_code=204)
+def delete_monitor_endpoint(
+    monitor_id: int,
+    db: Session = Depends(get_db),
+    scheduler=Depends(get_scheduler),
+) -> Response:
+    """Soft-delete a monitor (§14): flip ``enabled=False`` (the row PERSISTS — opportunity reports
+    reference it and the DB enabled-guard in run_monitor_job is authoritative) and disarm the live
+    scheduler job. Idempotent: deleting an already-disabled monitor is a 204 no-op (the row still
+    exists); 404 only when the id is unknown. The job disarm is best-effort via ``_safe_reschedule``
+    (same contract as PATCH enabled=False) — a scheduler failure never fails the DB write."""
+    monitor = db.get(MonitorConfig, monitor_id)
+    if monitor is None:
+        raise HTTPException(status_code=404, detail=f"monitor {monitor_id} not found")
+    monitor.enabled = False
+    with _db_locked_to_503(db):
+        db.commit()
+    db.refresh(monitor)
+    _safe_reschedule(scheduler, monitor)
+    return Response(status_code=204)
 
 
 @router.post("/monitors/{monitor_id}/run")
