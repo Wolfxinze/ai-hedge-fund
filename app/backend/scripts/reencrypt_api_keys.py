@@ -12,6 +12,9 @@ Exit codes
 
 The sweep is idempotent: already-encrypted rows are skipped (byte-identical).
 Run with --dry-run to preview what would change without committing.
+
+See ``docs/api-key-encryption-runbook.md`` for the full operator procedure (this sweep plus the
+``rotate_master_key`` rotation, with the mid-rotation quiesce/restart warning, issue #66-C).
 """
 
 from __future__ import annotations
