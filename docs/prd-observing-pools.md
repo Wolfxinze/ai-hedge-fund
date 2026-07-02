@@ -1,8 +1,8 @@
 # PRD — Innovation Observing Pools
 
-> **Status:** Shipped on `main` (backend Phases 1–11 + Phase 10 UI, PRs #3 → #50). Research-only feature.
+> **Status:** Shipped on `main` (backend Phases 1–11 + Phase 10 UI + monitor committee engine #51, PRs #3 → #54). Research-only feature.
 > **Document type:** Reconstructed PRD (see *Provenance* below).
-> **Last reconciled against code:** 2026-07-01.
+> **Last reconciled against code:** 2026-07-02.
 
 ---
 
@@ -82,6 +82,8 @@ See §11.5 (substantiation) and the Serenity subsystem below. Feeds the `serenit
 
 ### §9.7 Monitors
 A monitor = a reusable watchlist + analysis-flow config: `tickers`, `granularity` (daily/weekly/monthly/custom), optional `platform_keys`, optional `selected_analysts`, `schedule`. Each run emits one report per ticker, each disclaimer-stamped. CRUD + manual-run via CLI and API (§14).
+
+**Analyzing engine (#51, PR #52).** The **default** analyzing flow is the ai-hedge-fund committee (`monitoring/committee_flow.py`), built from `monitor.selected_analysts` (`None`/`[]` → full committee; mean-score bands ≥60 bullish / ≤40 bearish). The Phase-0 vertical slice used **TradingAgents'** multi-agent debate graph as the engine; that path is **demoted to an injectable adapter** (`src/integrations/tradingagents_adapter.py` + `TradingAgent/tradingagents_runner.py`, process-isolated seam) — retained for tests and optional use, no longer the default.
 
 ### §9.8 CLI workflow
 `python -m src.observing_pools {init|refresh|inspect}`; `python -m src.serenity {research|discover|apply}`; `python -m src.monitoring {create|run|export|list}`.
@@ -175,7 +177,7 @@ Bare-dict / `HTTPException` responses (matches existing `observing_pools.py`, no
 | GET · PATCH · DELETE | `/monitors/{id}` | get · partial update (hot-reschedule) · delete (204, deactivates job) |
 | POST | `/monitors/{id}/run` | manual run; **max 2 concurrent** (`BoundedSemaphore` → 429 over cap); `degraded_count` in response |
 
-**Validation/limits:** ticker regex `^[A-Za-z0-9.\-]{1,16}$` → 422; tickers ≤ 100; `platform_key` ∈ the 5 keys; limits bounded; `selected_analysts` validated against `ANALYST_CONFIG` (lazy import; **validate-only** — deliberately not wired into the committee run path, tracked as feature #51); schedule validated against `MONITOR_MIN_INTERVAL_SECONDS` floor (default 3600) → 422.
+**Validation/limits:** ticker regex `^[A-Za-z0-9.\-]{1,16}$` → 422; tickers ≤ 100; `platform_key` ∈ the 5 keys; limits bounded; `selected_analysts` validated against `ANALYST_CONFIG` (lazy import) and — since **#51 (PR #52)** — **load-bearing** in the monitor run path via `committee_flow.py` (`None`/`[]` → full committee); schedule validated against `MONITOR_MIN_INTERVAL_SECONDS` floor (default 3600) → 422.
 
 **Scheduler** (Phase 8) — in-process APScheduler (`BackgroundScheduler`, UTC, `max_workers=2`, `max_instances=1`, `coalesce=True`): a weekly refresh (`OBSERVING_POOL_REFRESH_CRON`, default Mon 08:00) + per-enabled-monitor jobs; wired via `main.py` startup/shutdown (bad cron → app still boots). Heavy scoring stack lazy-imported.
 
@@ -223,13 +225,14 @@ All phases merged to `main`. (P-numbers are the original PRD's; delivery order d
 | P10 | Research UI (§13/§16) | #29 | ✅ merged |
 | §11.5 | Numeric + anti-stuffing substantiation gates | #42, #44 | ✅ merged |
 | #21 | Monitor allowlist (validate-only) + concurrency + route-shadow doc | #50 | ✅ merged |
+| #51 | Monitor committee analyzing engine — `selected_analysts` load-bearing (supersedes the Phase-0 TradingAgents engine; TradingAgents → injectable) | #52 (+#53/#54) | ✅ merged |
 
 ## §22 Open backlog (deferred — not defects)
 
 - **#23 — counsel sign-off** (§19): human-only release precondition. *Open by design.*
 - **#25 — key rotation / re-encrypt sweep**: `rotate_master_key` shipped (PR #65); lazy upgrade-on-write is the current re-encrypt path.
 - **#43 — §11.5 polish**: surface-form equality (`$1,200 ≡ 1200`, `10x ≡ 10 times`), salad table-header heuristic.
-- **#51 — committee wiring**: thread `monitor.selected_analysts` into the run path and flip allowlist from validate-only → enforced (feature-scale; reverses the #21 lock, so gated on explicit decision).
+- **#51 — committee wiring**: ✅ *shipped (PR #52).* `monitor.selected_analysts` is now threaded into the monitor run path via `committee_flow.py` (default engine = ai-hedge-fund committee; TradingAgents demoted to injectable — see §9.7). No longer open backlog.
 - **Naming drift**: `v3-*` code constants vs `v4-*` PRD naming — resolve by rename+migrate *or* by accepting the code as authoritative (this doc does the latter).
 
 ---
