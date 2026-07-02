@@ -19,7 +19,7 @@ COMPONENT_WEIGHTS: dict[str, float] = {
     "platform_fit": 0.25,  # classifier confidence (§9.5)
     "value_investor": 0.30,  # Buffett/Munger/Graham/Pabrai/Fisher/Lynch/Damodaran/Valuation/Fundamentals
     "innovation_growth": 0.20,  # Cathie Wood + Growth Analyst
-    "risk_adjusted_momentum": 0.10,  # Technical/Sentiment/News/Burry/Druckenmiller − risk haircut
+    "risk_adjusted_momentum": 0.10,  # Technical/Sentiment/News/Burry/Druckenmiller (momentum-only; risk haircut DEFERRED — see PRD §11.2/§22; I1: no risk_manager import)
     "serenity_bottleneck": 0.15,  # Serenity record, gated by evidence grade (§9.6)
 }
 
