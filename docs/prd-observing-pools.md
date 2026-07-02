@@ -186,7 +186,7 @@ Bare-dict / `HTTPException` responses (matches existing `observing_pools.py`, no
 Covered by `tests/observing_pools/test_api_e2e.py`, `tests/monitoring/`, `tests/serenity/`, and the eval suites; mandatory file-backed threaded tests pin the PoolLock and refresh-concurrency atomicity (one 200 + one 409 under concurrent same-platform refresh).
 
 ## §19 Counsel sign-off gate
-A **recorded human line** (not automated) required before any non-loopback exposure. `record_signoff` (evals) + `src/compliance.py`. This remains the one open, human-only release precondition.
+A **recorded human line** (not automated) required before any non-loopback exposure. `record_signoff` (evals) + `src/compliance.py`. The **precondition is now runtime-enforced at bind**: `compliance.enforce_nonloopback_signoff()` runs at `app/backend/main.py` import, so a non-loopback `SERVER_BIND_HOST` with no *approved* sign-off at `COUNSEL_SIGNOFF_PATH` (default `evals_runs/signoff.jsonl`) raises `RuntimeError` and the process exits non-zero before it can bind — loopback/unset/dev/CI are a byte-for-byte no-op. The **verdict itself stays human**: recording the approved line is the one open, human-only release precondition (*open by design*, see §22). Pinned by `tests/observing_pools/test_signoff_gate.py`.
 
 ---
 
@@ -232,7 +232,7 @@ All phases merged to `main`. (P-numbers are the original PRD's; delivery order d
 
 - **#66 — key rotation is unsafe against a live backend + needs a runbook (OPEN — the only open issue).** A `#25` follow-up with three gaps, all addressed in this change: **(A)** a running backend caches the OLD master key in memory and keeps encrypting new writes under it until repoint+restart — retiring the old key early orphans those rows (now a loud mid-rotation WARNING in `rotate_master_key`); **(B)** no nudge to run the plaintext sweep when rows are skipped (now printed on `skipped_plaintext>0`); **(C)** no operator runbook (now [`docs/api-key-encryption-runbook.md`](api-key-encryption-runbook.md)).
 - **Risk-Manager haircut — deferred quant work (not a defect).** `risk_adjusted_momentum` is momentum-only today (§11.2); the `− risk haircut` term is not yet applied. Wiring it is a product/quant decision and must stay signal-only — **I1** forbids importing `risk_manager` into the scoring path (signal-only; no risk_manager import).
-- **§19 counsel sign-off** — human-only release precondition; *open by design* (the legal act stays human). Not a numbered open issue.
+- **§19 counsel sign-off** — human-only release precondition; *open by design* (the legal act stays human). Not a numbered open issue. The precondition is now **runtime-enforced at bind** (`compliance.enforce_nonloopback_signoff` — a non-loopback `SERVER_BIND_HOST` without an approved sign-off exits non-zero before binding); only the human verdict remains open.
 - **#23 — CLOSED** (Phase-11 deferral: `serialize_serenity` chokepoint, §11.5 numeric substantiation, formula-version drift — all shipped). *Not* the counsel sign-off.
 - **#25 — ✅ shipped** (PR #65: `rotate_master_key` + re-encrypt sweep). Operational follow-up tracked as **#66** (above).
 - **#43 — wontfix-by-design / CLOSED**: §11.5 surface-form equality + salad table-header heuristic — a numeric-equivalence exemption re-opens a stuffing evasion (§11.5), so the gate stays conservative.

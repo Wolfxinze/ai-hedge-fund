@@ -17,6 +17,14 @@ from src.scheduler.scheduler import build_scheduler, start_scheduler, stop_sched
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# §19 gate: refuse to bind a non-loopback host without a recorded counsel sign-off.
+# Runs at import (before uvicorn binds) so a misconfigured deploy exits non-zero rather
+# than exposing the surface. Loopback / unset / dev / CI is a no-op (byte-for-byte
+# unchanged). The human legal act itself stays open by design (PRD §19).
+from src.compliance import enforce_nonloopback_signoff
+
+enforce_nonloopback_signoff()
+
 app = FastAPI(title="AI Hedge Fund API", description="Backend API for AI Hedge Fund", version="0.1.0")
 
 # Dev convenience: create any missing tables. Alembic migrations are the canonical

@@ -118,3 +118,11 @@ assert signoff_recorded("evals_runs/signoff.jsonl")
 ```
 
 Its absence is reported as a release-blocker; it never makes a suite "pass".
+
+**Runtime-enforced at bind.** The precondition is no longer documentation-only:
+`compliance.enforce_nonloopback_signoff()` runs at `app/backend/main.py` import, so
+binding a non-loopback `SERVER_BIND_HOST` without an *approved* sign-off at
+`COUNSEL_SIGNOFF_PATH` (default `evals_runs/signoff.jsonl`) raises `RuntimeError` and the
+process exits non-zero **before** it can serve. Loopback / unset / dev / CI are a
+byte-for-byte no-op. The human verdict (recording the approved line) still stays open by
+design — the gate only refuses to expose the surface until that line exists.
