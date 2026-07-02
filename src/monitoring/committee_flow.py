@@ -102,7 +102,8 @@ def _aggregate(ticker: str, committee: list[str], signals: dict[str, dict[str, d
             # ``agents_bridge.component_scores`` ("omit (not zero)"). Accurate today, but it
             # couples to that omit-vs-zero contract: if component_scores ever folds absent
             # analysts in as a zero (or any other default), this branch and the mean below go
-            # stale and must change in lockstep.
+            # stale and must change in lockstep. Pinned by
+            # tests/observing_pools/test_omit_not_zero_contract.py (mutation-sensitive).
             continue
         score, degraded, reason = _safe_agent_score(raw)
         agent_reports[key] = {
