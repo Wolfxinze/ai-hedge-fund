@@ -56,3 +56,25 @@ def test_unresolvable_hostname_fails_closed(tmp_path):
     # A bind host we cannot prove is loopback is treated as non-loopback (fail-closed).
     with pytest.raises(RuntimeError):
         enforce_nonloopback_signoff(_env(host="example.com", signoff_path=tmp_path / "signoff.jsonl"))
+
+
+def test_gate_is_wired_into_main_at_import(monkeypatch, tmp_path):
+    """The gate must be CALLED at app.backend.main import — not merely defined in compliance.
+
+    WHY: every test above exercises the pure function in isolation, so a refactor that deletes or
+    relocates the ``enforce_nonloopback_signoff()`` call in ``app/backend/main.py`` would leave the
+    whole suite green while silently re-opening the exact non-loopback exposure §19 closes. This pins
+    the call SITE: importing the app under a non-loopback ``SERVER_BIND_HOST`` with no approved
+    sign-off must raise ``RuntimeError`` before the FastAPI app (and any bind) is built."""
+    import importlib
+    import sys
+
+    monkeypatch.setenv("SERVER_BIND_HOST", "0.0.0.0")
+    monkeypatch.setenv("COUNSEL_SIGNOFF_PATH", str(tmp_path / "no-signoff.jsonl"))
+    sys.modules.pop("app.backend.main", None)  # force the module body (and the gate) to re-run
+    try:
+        with pytest.raises(RuntimeError, match="§19"):
+            importlib.import_module("app.backend.main")
+    finally:
+        # A raised import never caches; pop again so a later clean import re-runs from a fresh state.
+        sys.modules.pop("app.backend.main", None)

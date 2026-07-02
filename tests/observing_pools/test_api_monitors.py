@@ -900,6 +900,11 @@ def test_delete_monitor_is_idempotent(env):
     mid = env.client.post("/monitors", json={"name": "twice", "tickers": ["NVDA"]}).json()["id"]
     assert env.client.delete(f"/monitors/{mid}").status_code == 204
     assert env.client.delete(f"/monitors/{mid}").status_code == 204
+    # The second delete must be a pure no-op: the row still exists and stays disabled — never
+    # hard-dropped, resurrected, or re-enabled (a 204 alone would not catch such a regression).
+    with contextlib.closing(env.SessionLocal()) as s:
+        row = s.get(MonitorConfig, mid)
+        assert row is not None and row.enabled is False, "a repeat delete must leave the soft-deleted row intact"
 
 
 def test_delete_monitor_disarms_live_job(env_with_started_scheduler):

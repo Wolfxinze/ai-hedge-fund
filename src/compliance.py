@@ -13,8 +13,10 @@ from collections.abc import Mapping
 
 DISCLAIMER_VERSION = os.environ.get("DISCLAIMER_VERSION", "2026-06")
 
-# §19 non-loopback exposure gate. The default sign-off ledger mirrors docs/evals.md
-# (repo-root-anchored, gitignored ``evals_runs/``); override with COUNSEL_SIGNOFF_PATH.
+# §19 non-loopback exposure gate. The default sign-off ledger shares the NAME documented in
+# docs/evals.md (gitignored ``evals_runs/``); override with COUNSEL_SIGNOFF_PATH. Note this
+# constant is a CWD-relative path (unlike the evals run-dir, which is repo-root-anchored), so a
+# non-loopback deploy should pass an absolute COUNSEL_SIGNOFF_PATH or run from the repo root.
 DEFAULT_COUNSEL_SIGNOFF_PATH = "evals_runs/signoff.jsonl"
 # Bind hosts treated as loopback by name (case-insensitive). Numeric loopback
 # (127.0.0.0/8, ::1) is detected via ipaddress, so it need not be enumerated here.
@@ -35,9 +37,9 @@ def research_disclaimer() -> tuple[str, str]:
 
 
 def _is_loopback_host(host: str) -> bool:
-    """True for loopback/unset bind hosts (localhost, 127.0.0.0/8, ::1). A host we
-    cannot prove is loopback (an unparseable name, a public IP, 0.0.0.0) → False,
-    so the gate fails closed."""
+    """True for loopback bind hosts (localhost, 127.0.0.0/8, ::1; the empty string counts as
+    localhost). A host we cannot prove is loopback (an unparseable name, a public IP, 0.0.0.0)
+    → False, so the gate fails closed. (The unset→127.0.0.1 default is resolved by the caller.)"""
     h = host.strip().lower()
     if h in _LOOPBACK_NAMES:
         return True
@@ -55,7 +57,10 @@ def enforce_nonloopback_signoff(env: Mapping[str, str] | None = None) -> None:
     name), an approved sign-off must already be recorded at ``COUNSEL_SIGNOFF_PATH``
     (default ``evals_runs/signoff.jsonl``); otherwise raise ``RuntimeError`` so the
     process exits non-zero *before* binding. The legal act itself stays human — this only
-    enforces the precondition at bind time. ``env`` defaults to ``os.environ`` (injectable
+    enforces the precondition at bind time. GUARANTEE SCOPE: the gate keys on ``SERVER_BIND_HOST``,
+    so it protects deploys whose uvicorn ``--host`` derives from that env var (as ``app/run.sh``
+    does); a hand-rolled ``uvicorn --host 0.0.0.0`` that leaves ``SERVER_BIND_HOST`` unset would
+    bypass it — non-loopback deploys MUST set ``SERVER_BIND_HOST``. ``env`` defaults to ``os.environ`` (injectable
     for tests). ``signoff_recorded`` is imported lazily to avoid pulling the evals stack at
     module load and to keep the reporting dependency one-directional (no import cycle)."""
     env = os.environ if env is None else env
