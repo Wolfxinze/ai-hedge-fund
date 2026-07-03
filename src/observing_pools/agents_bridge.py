@@ -86,7 +86,10 @@ def component_scores(
         for key in analyst_keys:
             raw = analyst_signals.get(f"{key}_agent", {}).get(ticker)
             if raw is None:
-                continue  # agent not run / no signal for this ticker → omit (not zero)
+                # agent not run / no signal for this ticker → omit (not zero). This omit-vs-zero
+                # contract is shared with committee_flow._aggregate and pinned (mutation-sensitive)
+                # by tests/observing_pools/test_omit_not_zero_contract.py.
+                continue
             score, degraded, degraded_reason = _safe_agent_score(raw)
             if not degraded:
                 scores.append(score)  # degraded → recorded below but excluded from the mean

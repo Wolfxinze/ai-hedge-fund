@@ -40,6 +40,21 @@ def test_wrong_figure_does_not_substantiate():
     assert substantiation_reason(claim, excerpt, SourceType.FILING) == "figure_missing"
 
 
+def test_surface_form_10x_not_equal_10_times_is_wontfix_by_design():
+    """#43 wontfix-by-design (CLOSED): surface-form equality (`10x ≡ 10 times`) is deliberately NOT
+    implemented. `10x` is a figure (unit `x`); `10 times` is a bare integer (`times` is not a unit),
+    so a claim stating `10x` is NOT substantiated by an excerpt that only says `10 times`. Pins the
+    conservative fail-closed behaviour — a numeric-equivalence exemption would re-open a stuffing
+    evasion (see PRD §11.5/§22). The mirror (`10x` claim vs `10x` excerpt) DOES substantiate.
+    """
+    claim = "the process throughput improved 10x versus the prior node generation"
+    excerpt_times = "the process throughput improved 10 times versus the prior node generation"
+    excerpt_10x = "the process throughput improved 10x versus the prior node generation"
+    assert is_substantiated(claim, excerpt_times) is False, "10x ≡ 10 times equality must NOT be inferred (#43 wontfix)"
+    assert substantiation_reason(claim, excerpt_times, SourceType.FILING) == "figure_missing"
+    assert is_substantiated(claim, excerpt_10x) is True, "an exact 10x match must still substantiate"
+
+
 def test_missing_figure_does_not_substantiate():
     claim = "gallium nitride wafer supply fell 40% amid a capacity bottleneck"
     # On-topic but omits the claimed figure entirely.

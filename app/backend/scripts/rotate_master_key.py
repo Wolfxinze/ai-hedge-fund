@@ -21,6 +21,12 @@ Exit codes
 Run with --dry-run to preview the counts without committing. After a real rotation, repoint the
 master key (OS keyring item ``master_key`` or ``AHF_MASTER_KEY``) to the new value and restart;
 the old key can then be retired.
+
+WARNING (issue #66-A, mid-rotation data loss): a running backend caches the OLD master key in memory
+and keeps encrypting NEW writes under it until it is repointed AND restarted — retiring the old key
+before that restart would orphan those in-flight rows (they no longer decrypt). Quiesce/stop the
+backend across the repoint+restart. There is no cross-process lock here; the full ordered procedure
+is in ``docs/api-key-encryption-runbook.md``.
 """
 
 from __future__ import annotations
@@ -41,6 +47,14 @@ _NEW_KEY_ENV = "AHF_MASTER_KEY_NEW"
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Rotate the API-key master key: re-encrypt all rows from the current key to a new key.",
+        epilog=(
+            "MID-ROTATION WARNING (#66-A): a running backend caches the OLD master key in memory and "
+            "keeps encrypting new writes under it until you repoint to AHF_MASTER_KEY_NEW and RESTART; "
+            "retiring the old key before that restart orphans those in-flight rows. Quiesce/stop the "
+            "backend across the repoint+restart. See docs/api-key-encryption-runbook.md for the "
+            "ordered steps."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--dry-run",
@@ -85,6 +99,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = rotate_api_key_master(db, old_fernet=old_fernet, new_fernet=new_fernet, commit=True)
             print(f"scanned={result.scanned} rotated={result.rotated} " f"skipped_plaintext={result.skipped_plaintext} skipped_empty={result.skipped_empty}")
             if result.rotated:
+                # #66-A data-loss guard: the DB rows are now under the new key, but a still-running
+                # backend holds the OLD key cached in memory and keeps encrypting NEW writes under it
+                # until it is repointed AND restarted — retiring the old key before that restart would
+                # orphan those in-flight rows. Warn BEFORE the retire line so the operator quiesces the
+                # backend across the repoint+restart. Advisory only — there is no cross-process lock.
+                print(
+                    "WARNING: a running backend still holds the OLD master key cached in memory and "
+                    f"will keep encrypting new writes under it until you repoint to the {_NEW_KEY_ENV} "
+                    "value AND restart; quiesce/stop the backend across the repoint+restart, or those "
+                    "in-flight rows are orphaned when the old key is retired "
+                    "(see docs/api-key-encryption-runbook.md)."
+                )
                 # Next-steps: the DB rows are now under the new key, but the resolved master is still
                 # the old one for any running process. The operator must repoint the source + restart.
                 print(f"rotation complete — now repoint the master key (OS keyring item 'master_key' or " f"AHF_MASTER_KEY) to the {_NEW_KEY_ENV} value and restart; the old key can then be retired.")
@@ -92,6 +118,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # Nothing was re-keyed — do NOT advise retiring the old key (a no-op on this DB); that
                 # would erode trust in the message for the run that actually rotates rows.
                 print("no encrypted rows were rotated — nothing to repoint (run the re-encrypt sweep first if rows are still plaintext).")
+        # #66-B: rotation only re-keys enc:v1: rows; any still-plaintext rows are OUT of its domain and
+        # remain plaintext. Nudge the operator to run the re-encrypt sweep so those rows get encrypted
+        # under the master key. Keyed strictly on skipped_plaintext>0 (independent of the rotated
+        # branch, and shown for --dry-run too); this note never mentions retiring the old key.
+        if result.skipped_plaintext:
+            print(
+                f"note: {result.skipped_plaintext} plaintext row(s) were skipped (rotation only "
+                "re-keys already-encrypted rows); run 'python -m app.backend.scripts.reencrypt_api_keys' "
+                "to encrypt them under the master key (see docs/api-key-encryption-runbook.md)."
+            )
     except Exception as exc:
         # Fail loud with the error TYPE + message (not a bare str) so a CryptoError (wrong/malformed
         # key) is distinguishable from, say, an OperationalError at a glance.

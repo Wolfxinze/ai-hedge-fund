@@ -72,7 +72,8 @@ def build_record(
             excerpt=excerpt,
         )
         if not cls["substantiated"]:
-            # Make a withheld grade auditable in logs (DB column for reason is a future phase).
+            # Make a withheld grade auditable in logs; the reason is also persisted
+            # onto evidence_references.reason below (§11.5 durability, audit-only).
             logger.info("serenity reference unsubstantiated (%s): %s", cls.get("reason"), ref["source_url"])
         classified.append(
             {**cls, "source_url": ref["source_url"], "claim_summary": ref.get("claim_summary"), "excerpt": excerpt}
@@ -109,6 +110,7 @@ def build_record(
                 source_host=c["source_host"],
                 source_type=c["source_type"].value,
                 substantiated=c["substantiated"],
+                reason=c.get("reason"),  # §11.5: persist the already-computed reason (audit-only)
                 excerpt=c["excerpt"],
                 claim_summary=c["claim_summary"],
             )

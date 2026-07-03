@@ -523,6 +523,58 @@ class TestRotateCliBehavior:
         assert "nothing to repoint" in out
         assert "retire" not in out, "must not advise retiring the old key when nothing was rotated"
 
+    def test_main_rotated_warns_about_mid_rotation_caching_before_retire(self, monkeypatch, capsys, session, rot_on):
+        """#66-A: a successful rotation (rotated>0) must warn that a running backend still holds the
+        OLD key cached in memory (writing new rows under it until repoint+restart) BEFORE the
+        'old key can then be retired' guidance — so the operator quiesces across the restart and does
+        not retire the old key while in-flight rows are still encrypted under it (data-loss guard).
+        """
+        _insert_raw(session, "OPENAI_API_KEY", _enc(_OLD_KEY, "sk-secret"))
+        cli = _wire_session_local(monkeypatch, session)
+
+        exit_code = cli.main([])
+
+        assert exit_code == 0
+        low = capsys.readouterr().out.lower()
+        assert "rotated=1" in low
+        assert "cached in memory" in low, "must warn the running backend caches the old key"
+        assert "restart" in low, "must tell the operator to restart after repointing"
+        assert low.index("cached in memory") < low.index("old key can then be retired"), (
+            "the mid-rotation caching warning must come BEFORE the retire guidance"
+        )
+
+    def test_main_skipped_plaintext_prints_reencrypt_sweep_note(self, monkeypatch, capsys, session, rot_on):
+        """#66-B: when the run skips plaintext rows (skipped_plaintext>0), nudge the operator to run
+        the reencrypt_api_keys sweep — even alongside a successful rotation — and that note must never
+        mention retiring the old key (it is orthogonal to the rotated/retire guidance).
+        """
+        _insert_raw(session, "OPENAI_API_KEY", _enc(_OLD_KEY, "sk-secret"))  # tagged → rotated=1
+        _insert_raw(session, "PLAIN_KEY", "sk-plain")  # untagged → skipped_plaintext=1
+        cli = _wire_session_local(monkeypatch, session)
+
+        exit_code = cli.main([])
+
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "rotated=1" in out and "skipped_plaintext=1" in out
+        assert "reencrypt_api_keys" in out, "must nudge the operator to run the re-encrypt sweep"
+        note_line = next(line for line in out.splitlines() if "reencrypt_api_keys" in line)
+        assert "retire" not in note_line, "the sweep note must not mention retiring the old key"
+
+    def test_main_no_plaintext_omits_reencrypt_sweep_note(self, monkeypatch, capsys, session, rot_on):
+        """#66-B negative: with no plaintext rows (skipped_plaintext=0) the sweep note is NOT printed
+        — the nudge is keyed strictly on skipped_plaintext>0.
+        """
+        _insert_raw(session, "OPENAI_API_KEY", _enc(_OLD_KEY, "sk-secret"))  # only a tagged row
+        cli = _wire_session_local(monkeypatch, session)
+
+        exit_code = cli.main([])
+
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "skipped_plaintext=0" in out
+        assert "reencrypt_api_keys" not in out, "no sweep note when there are no plaintext rows"
+
     def test_main_unprovisioned_master_never_mints_exits_1(self, monkeypatch, capsys, session):
         """KEY_ENCRYPTION on + AHF_MASTER_KEY_NEW set but NO current master (keyring empty + env
         unset): main() must fail loud (exit 1, CryptoMasterKeyError, 'no rows committed') and never

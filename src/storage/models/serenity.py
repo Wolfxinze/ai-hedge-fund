@@ -93,6 +93,7 @@ class EvidenceReference(Base):
     source_host = Column(String(255), nullable=True)
     source_type = Column(String(32), nullable=False, default=SourceType.UNVERIFIED.value)  # host-derived
     substantiated = Column(Boolean, nullable=False, default=False)  # deterministic claim↔text check
+    reason = Column(Text, nullable=True)  # deterministic substantiation_reason (§11.5 durability; audit-only, not serialized)
     excerpt = Column(Text, nullable=True)
     claim_summary = Column(Text, nullable=True)  # LLM-provided, untrusted for grading
     created_at = Column(DateTime(timezone=True), server_default=func.now())

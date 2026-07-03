@@ -217,8 +217,9 @@ def classify_reference(
 ) -> dict:
     """Derive {source_host, source_type, substantiated, reason} deterministically.
 
-    ``reason`` is observability only (not persisted) — it explains a withheld grade
-    without changing the deterministic grade computation.
+    ``reason`` is audit metadata — persisted onto ``evidence_references.reason`` by
+    ``build_record`` (§11.5 durability) but never fed back into the deterministic grade
+    computation, and not exposed through ``serialize_serenity``/the API.
     """
     host = host_of(source_url)
     stype = source_type_for_host(host, allowlist)
