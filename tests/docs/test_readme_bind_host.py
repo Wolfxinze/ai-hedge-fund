@@ -11,6 +11,9 @@ A per-line negative scan closes the confirmed HIGH seam: EVERY line that invokes
 ``uvicorn main:app`` must carry ``SERVER_BIND_HOST`` on that same line, so a future
 edit adding a second, gate-blind example (e.g. ``poetry run uvicorn main:app --host
 0.0.0.0``) fails the guard instead of slipping through a "≥1 compliant example" check.
+The scan covers both READMEs plus ``docs/observing-pools-v0-usage.md`` (issue #70 —
+the usage doc's launch command was left gate-blind by the 2026-07-04 two-README
+scope-lock); the README-specific prose assertions stay scoped to the READMEs.
 A companion test pins ``app/run.sh``'s derivation byte-exact
 (``--host "${SERVER_BIND_HOST:-127.0.0.1}"``) — the fastest-rotting claim this
 docstring makes — so every claim here is now enforced.
@@ -25,6 +28,9 @@ from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[2]
 _READMES = (_REPO / "app" / "backend" / "README.md", _REPO / "app" / "README.md")
+# Per-line gate-blind scan covers every doc with a runnable launch command (#70);
+# the coupling-explanation prose tests stay scoped to _READMES.
+_SCANNED_DOCS = _READMES + (_REPO / "docs" / "observing-pools-v0-usage.md",)
 _RUN_SH = _REPO / "app" / "run.sh"
 
 _UVICORN_MAINAPP = "uvicorn main:app"
@@ -69,17 +75,18 @@ def test_both_readmes_explain_the_env_var_not_flag_coupling():
         )
 
 
-def test_no_uvicorn_mainapp_line_in_either_readme_is_gate_blind():
+def test_no_uvicorn_mainapp_line_in_any_scanned_doc_is_gate_blind():
     """Per-line scan: no `uvicorn main:app` command may omit SERVER_BIND_HOST.
 
     Stronger than "≥1 compliant example exists" — a future edit that adds a second,
     gate-blind invocation (``poetry run uvicorn main:app --host 0.0.0.0``) turns this
-    RED, whereas the existence check above would stay green.
+    RED, whereas the existence check above would stay green. Scans _SCANNED_DOCS
+    (both READMEs + the usage doc, #70), not just _READMES.
     """
-    for readme in _READMES:
-        offenders = _gate_blind_uvicorn_lines(readme.read_text())
+    for doc in _SCANNED_DOCS:
+        offenders = _gate_blind_uvicorn_lines(doc.read_text())
         assert not offenders, (
-            f"{readme.relative_to(_REPO)} has `uvicorn main:app` command(s) that do not set "
+            f"{doc.relative_to(_REPO)} has `uvicorn main:app` command(s) that do not set "
             f"SERVER_BIND_HOST on the same line — the §19 gate would silently not fire: {offenders}"
         )
 
