@@ -60,11 +60,18 @@ To run the development server:
 # Navigate to the backend directory
 cd app/backend
 
-# Start the FastAPI server with uvicorn
-poetry run uvicorn main:app --reload
+# Start the FastAPI server with uvicorn (explicit loopback bind)
+SERVER_BIND_HOST=127.0.0.1 poetry run uvicorn main:app --reload
 ```
 
 This will start the FastAPI server with hot-reloading enabled.
+
+> **Bind-host note (§19):** the compliance gate that guards non-loopback exposure reads the
+> `SERVER_BIND_HOST` environment variable, **not** uvicorn's `--host` flag — running
+> `uvicorn --host 0.0.0.0` with the variable unset bypasses the gate. Keep the two in sync;
+> `app/run.sh` does this by deriving `--host` from `SERVER_BIND_HOST` directly. Binding any
+> non-loopback host (e.g. `0.0.0.0`) requires an approved counsel sign-off recorded at
+> `COUNSEL_SIGNOFF_PATH` (see `src/compliance.py`), or the server refuses to start.
 
 The API will be available at:
 - API Endpoint: http://localhost:8000

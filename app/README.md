@@ -140,8 +140,13 @@ npm install  # or pnpm install or yarn install
 ```bash
 # In one terminal, from the backend directory
 cd app/backend
-poetry run uvicorn main:app --reload
+SERVER_BIND_HOST=127.0.0.1 poetry run uvicorn main:app --reload
 ```
+
+> **Bind-host note (§19):** the non-loopback compliance gate reads `SERVER_BIND_HOST`, not
+> uvicorn's `--host` flag — keep them in sync (`app/run.sh` derives `--host` from the variable).
+> A non-loopback bind (e.g. `0.0.0.0`) requires an approved counsel sign-off; without one the
+> server refuses to start.
 
 2. Start the frontend application:
 ```bash

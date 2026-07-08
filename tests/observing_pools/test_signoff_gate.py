@@ -24,9 +24,25 @@ def _env(host=None, signoff_path=None):
 
 
 @pytest.mark.parametrize("host", [None, "", "127.0.0.1", "localhost", "LOCALHOST", "::1", "127.0.0.5", "  127.0.0.1  "])
-def test_loopback_and_unset_never_raise(host, tmp_path):
-    # No sign-off file exists, yet a loopback/unset bind is a pure no-op (byte-for-byte unchanged).
-    enforce_nonloopback_signoff(_env(host=host, signoff_path=tmp_path / "nope.jsonl"))
+def test_loopback_and_unset_never_raise(host, tmp_path, monkeypatch):
+    """Loopback/unset is a PURE no-op — proven by the absence of side effects, not merely the
+    absence of a raise: the caller's env mapping is unmutated, no sign-off file is created at the
+    configured path, the filesystem around it stays untouched, and the sign-off ledger is never
+    consulted (no read-through). The last property closes a read-through escape: a refactor that
+    hoists the lazy ``from src.evals.reporting import signoff_recorded`` + its call above the
+    loopback early-return would keep the other assertions green while breaking the
+    lazy-import/no-consultation contract — so we monkeypatch ``signoff_recorded`` to fail loud."""
+    monkeypatch.setattr(
+        "src.evals.reporting.signoff_recorded",
+        lambda p: pytest.fail("loopback path must not consult the sign-off ledger"),
+    )
+    signoff_path = tmp_path / "nope.jsonl"
+    env = _env(host=host, signoff_path=signoff_path)
+    before = dict(env)
+    assert enforce_nonloopback_signoff(env) is None
+    assert env == before, "the no-op path must not mutate the caller's env mapping"
+    assert not signoff_path.exists(), "the no-op path must never create the sign-off file"
+    assert list(tmp_path.iterdir()) == [], "the no-op path must leave the filesystem untouched"
 
 
 def test_non_loopback_without_signoff_raises_naming_19_path_and_command(tmp_path):

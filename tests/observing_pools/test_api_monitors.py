@@ -12,6 +12,7 @@ live scheduler and that a scheduling failure never fails a successful DB write (
 """
 
 import contextlib
+from unittest.mock import patch
 
 import pytest
 from fastapi import FastAPI
@@ -949,6 +950,31 @@ def test_delete_monitor_no_scheduler_still_204(monkeypatch):
         assert s.get(MonitorConfig, mid).enabled is False
 
 
+def test_delete_monitor_preserves_referencing_report(env):
+    """A persisted opportunity_report outlives the soft-delete of its monitor: the report row keeps
+    its monitor_id FK and GET /opportunity-reports/{id} still serves it after DELETE /monitors/{id}.
+    WHY: reports are the research history the soft-delete exists to protect — deleting a monitor must
+    never cascade to, unlink, or hide the evidence trail it produced."""
+    mid = env.client.post("/monitors", json={"name": "history_keeper", "tickers": ["NVDA"]}).json()["id"]
+    env.client.post(f"/monitors/{mid}/run", json={"trade_date": "2026-06-12"})
+    report_id = env.client.get("/opportunity-reports").json()[0]["id"]
+    with contextlib.closing(env.SessionLocal()) as s:
+        assert s.get(OpportunityReport, report_id).monitor_id == mid  # genuinely references the monitor
+
+    assert env.client.delete(f"/monitors/{mid}").status_code == 204
+
+    got = env.client.get(f"/opportunity-reports/{report_id}")
+    assert got.status_code == 200 and got.json()["id"] == report_id, "report must stay readable after the delete"
+    with contextlib.closing(env.SessionLocal()) as s:
+        row = s.get(OpportunityReport, report_id)
+        assert row is not None and row.monitor_id == mid, "delete must not cascade to or unlink the report row"
+        assert s.get(MonitorConfig, mid) is not None, "the referenced monitor row must survive (soft delete)"
+
+    # The evidence trail must stay on the LIST surface too — not just by-id: if list_reports ever gains
+    # an enabled-monitor filter it would hide the report of a soft-deleted monitor while by-id stays 200.
+    assert report_id in {r["id"] for r in env.client.get("/opportunity-reports").json()}, "report must stay listed after the delete"
+
+
 # ── GET /monitors/{id} (§14) ─────────────────────────────────────────────────────────────────────
 # Single-monitor read mirroring get_report in observing_pools.py: 200 via _monitor_to_dict, 404 on
 # unknown. Read-only — no commit, no reschedule — and it must NOT shadow the GET /monitors list route.
@@ -981,10 +1007,26 @@ def test_get_single_does_not_shadow_list(env):
 
 
 def test_get_single_monitor_is_read_only(env_with_started_scheduler):
-    """GET /monitors/{id} does NOT reschedule or mutate: the live job is untouched after a read.
-    WHY: a read must be free of side effects — no disarm/re-arm, no commit."""
+    """GET /monitors/{id} does NOT reschedule or mutate: the live job is untouched AND no session
+    commit happens during the read. WHY: a read must be free of side effects — no disarm/re-arm, no
+    commit. The commit spy pins the route docstring's 'no commit' claim instead of trusting it."""
     mid = env_with_started_scheduler.client.post("/monitors", json={"name": "ro_read", "tickers": ["NVDA"]}).json()["id"]
     job_id = monitor_job_id(mid)
-    assert env_with_started_scheduler.sch.get_job(job_id) is not None
-    assert env_with_started_scheduler.client.get(f"/monitors/{mid}").status_code == 200
-    assert env_with_started_scheduler.sch.get_job(job_id) is not None, "a read must not disarm the live job"
+    before = env_with_started_scheduler.sch.get_job(job_id)
+    assert before is not None
+
+    commits = []
+    real_commit = SASession.commit
+
+    def spying_commit(session):
+        commits.append(session)
+        real_commit(session)
+
+    with patch.object(SASession, "commit", spying_commit):
+        assert env_with_started_scheduler.client.get(f"/monitors/{mid}").status_code == 200
+    assert commits == [], "GET /monitors/{id} must not commit"
+    after = env_with_started_scheduler.sch.get_job(job_id)
+    assert after is not None, "a read must not disarm the live job"
+    # MemoryJobStore holds Job instances, so a replace_existing re-arm yields a NEW object — identity
+    # catches a silent re-schedule that `is not None` alone would miss (pins the 're-arm' half of the docstring).
+    assert after is before, "a read must not re-arm (replace) the live job"
