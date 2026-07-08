@@ -9,6 +9,7 @@ bind host with no approved sign-off fails loud.
 """
 
 import pytest
+from fastapi.testclient import TestClient
 
 from src.compliance import enforce_nonloopback_signoff
 from src.evals.reporting import record_signoff
@@ -94,3 +95,66 @@ def test_gate_is_wired_into_main_at_import(monkeypatch, tmp_path):
     finally:
         # A raised import never caches; pop again so a later clean import re-runs from a fresh state.
         sys.modules.pop("app.backend.main", None)
+
+
+def test_serve_guard_refuses_non_loopback_arrival_wired_into_main(monkeypatch, tmp_path):
+    """The §19 layer-2 serve guard must be REGISTERED on ``app.backend.main.app`` — not merely
+    defined in compliance and exercised in isolation.
+
+    WHY: every ``NonLoopbackServeGuard`` unit test drives the class directly with hand-built
+    scopes, so deleting the ``app.add_middleware(NonLoopbackServeGuard)`` line in main.py would
+    leave the whole suite green while silently re-opening the hand-rolled ``uvicorn --host 0.0.0.0``
+    seam layer 2 exists to close. This pins the call SITE: a request ARRIVING on a non-loopback
+    local address with no approved sign-off must be refused (503) by the assembled app. It MUST go
+    RED if that add_middleware line is removed."""
+    # Imported plainly under the default (loopback) env and used via its ``app`` object — never
+    # reloaded with a non-loopback SERVER_BIND_HOST set (that raises at import by design).
+    import app.backend.main as main
+
+    monkeypatch.setenv("COUNSEL_SIGNOFF_PATH", str(tmp_path / "no-signoff.jsonl"))
+    # Starlette TestClient derives scope['server'] from base_url: 'http://203.0.113.9' -> ('203.0.113.9', 80),
+    # a non-loopback local address. DENY is never cached, so this host stays deny-able for later tests.
+    client = TestClient(main.app, base_url="http://203.0.113.9")
+    # Instant root health route (not the multi-second SSE ``/ping`` stream — fast RED feedback); the
+    # guard's 503 verdict is endpoint-agnostic, so any route the assembled app exposes proves the wire.
+    resp = client.get("/")
+    assert resp.status_code == 503
+    # The assembled app's refusal body names the §19 gate (excludes a coincidental 503 from a future
+    # layer) yet never leaks the sign-off ledger path — pinned on the ASSEMBLED app, not the bare class.
+    assert "§19" in resp.text
+    assert str(tmp_path) not in resp.text
+
+
+def test_serve_guard_does_not_refuse_the_default_testclient_suite(monkeypatch, tmp_path):
+    """The default-base_url TestClient host ('testserver') is not an IP, so the guard passes it
+    through and the endpoint serves normally.
+
+    WHY: registering the guard as the outermost middleware must be invisible to the hundreds of
+    existing ``TestClient(main.app)`` tests (whose scope['server'] is ('testserver', 80)) — the
+    guard can only 503 a real, parseable, non-loopback socket address, never a harness hostname.
+    (Uses the instant root health route rather than the multi-second SSE ``/ping`` stream — either
+    proves passthrough, and the guard's verdict is endpoint-agnostic.)"""
+    import app.backend.main as main
+
+    monkeypatch.setenv("COUNSEL_SIGNOFF_PATH", str(tmp_path / "no-signoff.jsonl"))
+    client = TestClient(main.app)  # default base_url 'http://testserver' -> unparseable host -> allowed
+    resp = client.get("/")
+    assert resp.status_code // 100 == 2
+
+
+def test_serve_guard_serves_non_loopback_arrival_with_approved_signoff(monkeypatch, tmp_path):
+    """With an approved counsel sign-off recorded, a non-loopback arrival is served — proving the
+    guard's ALLOW branch is wired, not only its refusal.
+
+    WHY: a mis-wire that always refused (or always served) would still pass the deny test above;
+    this pins that the assembled app honours a recorded sign-off. Uses a DISTINCT non-loopback host
+    (203.0.113.10) and a UNIQUE ledger path so the guard's per-host ALLOW cache (module-cached on
+    the shared ``main.app``) cannot leak an ALLOW verdict onto the deny test's host."""
+    import app.backend.main as main
+
+    ledger = tmp_path / "signoff.jsonl"
+    record_signoff(ledger, reviewer="counsel", notes="approved for shared exposure", approved=True)
+    monkeypatch.setenv("COUNSEL_SIGNOFF_PATH", str(ledger))
+    client = TestClient(main.app, base_url="http://203.0.113.10")
+    resp = client.get("/")  # instant root health route (not the multi-second SSE /ping); guard is endpoint-agnostic
+    assert resp.status_code == 200

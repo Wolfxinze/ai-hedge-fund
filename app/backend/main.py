@@ -20,8 +20,12 @@ logger = logging.getLogger(__name__)
 # §19 gate: refuse to bind a non-loopback host without a recorded counsel sign-off.
 # Runs at import (before uvicorn binds) so a misconfigured deploy exits non-zero rather
 # than exposing the surface. Loopback / unset / dev / CI is a no-op (byte-for-byte
-# unchanged). The human legal act itself stays open by design (PRD §19).
-from src.compliance import enforce_nonloopback_signoff
+# unchanged). The human legal act itself stays open by design (PRD §19). This is layer 1 of a
+# two-layer design: it keys on SERVER_BIND_HOST at import time, while layer 2 (the
+# NonLoopbackServeGuard middleware registered below) is a per-connection runtime backstop that
+# catches a hand-rolled `uvicorn --host 0.0.0.0` which leaves SERVER_BIND_HOST unset (and so slips
+# past this import-time gate).
+from src.compliance import enforce_nonloopback_signoff, NonLoopbackServeGuard
 
 enforce_nonloopback_signoff()
 
@@ -42,6 +46,13 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# §19 layer-2 runtime backstop, complementing the import-time env gate above: refuses requests
+# ARRIVING on a non-loopback local address without a recorded counsel sign-off, closing the
+# hand-rolled `uvicorn --host 0.0.0.0` seam (which leaves SERVER_BIND_HOST unset and so slips past
+# layer 1). add_middleware prepends, so registering it AFTER CORS makes the guard the outermost
+# middleware — it refuses a non-loopback arrival before any other layer runs.
+app.add_middleware(NonLoopbackServeGuard)
 
 # Include all routes
 app.include_router(api_router)

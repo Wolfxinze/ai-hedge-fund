@@ -1,8 +1,10 @@
 """Doc-guard: §19 bind-host README hardening (PR #68 deferred follow-up).
 
 The §19 non-loopback gate keys on the ``SERVER_BIND_HOST`` env var, NOT uvicorn's
-``--host`` flag — ``uvicorn --host 0.0.0.0`` with the env unset silently bypasses the
-gate. ``app/run.sh`` closes that seam by deriving ``--host`` from the variable
+``--host`` flag — ``uvicorn --host 0.0.0.0`` with the env unset bypasses the import-time
+env gate, but the ``NonLoopbackServeGuard`` runtime backstop (wired in
+``app/backend/main.py``) still refuses every non-loopback arrival until an approved counsel
+sign-off is recorded. ``app/run.sh`` closes the launch-command seam by deriving ``--host`` from the variable
 (``--host "${SERVER_BIND_HOST:-127.0.0.1}"``); a bare README command must model the
 same coupling. These pin both READMEs' uvicorn examples to set SERVER_BIND_HOST
 explicitly and to explain why, so a doc edit cannot regress to the gate-blind command.
@@ -104,3 +106,23 @@ def test_run_sh_derives_uvicorn_host_from_server_bind_host():
         '(expected `--host "${SERVER_BIND_HOST:-127.0.0.1}"`) so the launch path cannot bind '
         "non-loopback without the §19 gate seeing it — the module docstring quotes this line"
     )
+
+
+def test_both_readmes_name_the_runtime_backstop():
+    """Pin the runtime-backstop claim this branch added to both §19 blockquotes.
+
+    This branch rewrote both READMEs' §19 blockquotes to claim the ``NonLoopbackServeGuard``
+    runtime backstop catches a gate-blind ``uvicorn --host 0.0.0.0`` at request time — the
+    layer that survives when someone binds non-loopback without ``SERVER_BIND_HOST`` set.
+    Deleting those paragraphs would silently regress the docs to the false pre-branch claim
+    that the import-time env gate is the only non-loopback defence, while every existing
+    doc-guard test above stays green (they assert only the env-var/flag coupling, never the
+    backstop). This is the same existence-check blindness PR #69's HIGH finding closed for the
+    per-line ``uvicorn main:app`` scan.
+    """
+    for readme in _READMES:
+        assert "NonLoopbackServeGuard" in readme.read_text(), (
+            f"{readme.relative_to(_REPO)} §19 blockquote must name the `NonLoopbackServeGuard` "
+            "runtime backstop — without it the docs regress to claiming the import-time env gate "
+            "is the only non-loopback defence, which a gate-blind `uvicorn --host 0.0.0.0` defeats"
+        )
