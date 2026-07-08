@@ -9,7 +9,7 @@ Backend (FastAPI, http://localhost:8000):
 
 ```bash
 cd app/backend
-poetry run uvicorn main:app --reload
+SERVER_BIND_HOST=127.0.0.1 poetry run uvicorn main:app --reload
 ```
 
 Frontend (Vite dev server):
