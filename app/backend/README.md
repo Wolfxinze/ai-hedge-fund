@@ -68,10 +68,16 @@ This will start the FastAPI server with hot-reloading enabled.
 
 > **Bind-host note (§19):** the compliance gate that guards non-loopback exposure reads the
 > `SERVER_BIND_HOST` environment variable, **not** uvicorn's `--host` flag — running
-> `uvicorn --host 0.0.0.0` with the variable unset bypasses the gate. Keep the two in sync;
-> `app/run.sh` does this by deriving `--host` from `SERVER_BIND_HOST` directly. Binding any
-> non-loopback host (e.g. `0.0.0.0`) requires an approved counsel sign-off recorded at
-> `COUNSEL_SIGNOFF_PATH` (see `src/compliance.py`), or the server refuses to start.
+> `uvicorn --host 0.0.0.0` with the variable unset bypasses only the **import-time** env gate.
+> The §19 serve guard (`NonLoopbackServeGuard`, a runtime backstop wired in `app/backend/main.py`)
+> still refuses every request that arrives on a non-loopback local address until an approved
+> counsel sign-off is recorded. Keep the two in sync; `app/run.sh` does this by deriving `--host`
+> from `SERVER_BIND_HOST` directly. Binding any non-loopback host (e.g. `0.0.0.0`) requires an
+> approved counsel sign-off recorded at `COUNSEL_SIGNOFF_PATH` (see `src/compliance.py`), or the
+> server refuses to start. Both layers only cover the server's own bind address: a local reverse
+> proxy or port-forward fronting a loopback-bound server sits outside both the
+> `SERVER_BIND_HOST`/`--host` env gate and the `NonLoopbackServeGuard` runtime backstop, so an
+> approved counsel sign-off is still required before exposing the app that way.
 
 The API will be available at:
 - API Endpoint: http://localhost:8000

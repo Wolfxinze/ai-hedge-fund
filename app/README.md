@@ -145,8 +145,11 @@ SERVER_BIND_HOST=127.0.0.1 poetry run uvicorn main:app --reload
 
 > **Bind-host note (§19):** the non-loopback compliance gate reads `SERVER_BIND_HOST`, not
 > uvicorn's `--host` flag — keep them in sync (`app/run.sh` derives `--host` from the variable).
-> A non-loopback bind (e.g. `0.0.0.0`) requires an approved counsel sign-off; without one the
-> server refuses to start.
+> A hand-rolled non-loopback bind without the env var only slips past the import-time gate: the
+> §19 serve guard (`NonLoopbackServeGuard`, wired in `app/backend/main.py`) still catches it at
+> request time, refusing every non-loopback arrival until a sign-off is recorded. A non-loopback
+> bind (e.g. `0.0.0.0`) requires an approved counsel sign-off; without one the server refuses to
+> start.
 
 2. Start the frontend application:
 ```bash
