@@ -24,10 +24,18 @@ def _env(host=None, signoff_path=None):
 
 
 @pytest.mark.parametrize("host", [None, "", "127.0.0.1", "localhost", "LOCALHOST", "::1", "127.0.0.5", "  127.0.0.1  "])
-def test_loopback_and_unset_never_raise(host, tmp_path):
+def test_loopback_and_unset_never_raise(host, tmp_path, monkeypatch):
     """Loopback/unset is a PURE no-op — proven by the absence of side effects, not merely the
     absence of a raise: the caller's env mapping is unmutated, no sign-off file is created at the
-    configured path, and the filesystem around it stays untouched."""
+    configured path, the filesystem around it stays untouched, and the sign-off ledger is never
+    consulted (no read-through). The last property closes a read-through escape: a refactor that
+    hoists the lazy ``from src.evals.reporting import signoff_recorded`` + its call above the
+    loopback early-return would keep the other assertions green while breaking the
+    lazy-import/no-consultation contract — so we monkeypatch ``signoff_recorded`` to fail loud."""
+    monkeypatch.setattr(
+        "src.evals.reporting.signoff_recorded",
+        lambda p: pytest.fail("loopback path must not consult the sign-off ledger"),
+    )
     signoff_path = tmp_path / "nope.jsonl"
     env = _env(host=host, signoff_path=signoff_path)
     before = dict(env)

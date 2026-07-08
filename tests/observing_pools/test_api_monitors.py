@@ -970,6 +970,10 @@ def test_delete_monitor_preserves_referencing_report(env):
         assert row is not None and row.monitor_id == mid, "delete must not cascade to or unlink the report row"
         assert s.get(MonitorConfig, mid) is not None, "the referenced monitor row must survive (soft delete)"
 
+    # The evidence trail must stay on the LIST surface too — not just by-id: if list_reports ever gains
+    # an enabled-monitor filter it would hide the report of a soft-deleted monitor while by-id stays 200.
+    assert report_id in {r["id"] for r in env.client.get("/opportunity-reports").json()}, "report must stay listed after the delete"
+
 
 # ── GET /monitors/{id} (§14) ─────────────────────────────────────────────────────────────────────
 # Single-monitor read mirroring get_report in observing_pools.py: 200 via _monitor_to_dict, 404 on
@@ -1008,7 +1012,8 @@ def test_get_single_monitor_is_read_only(env_with_started_scheduler):
     commit. The commit spy pins the route docstring's 'no commit' claim instead of trusting it."""
     mid = env_with_started_scheduler.client.post("/monitors", json={"name": "ro_read", "tickers": ["NVDA"]}).json()["id"]
     job_id = monitor_job_id(mid)
-    assert env_with_started_scheduler.sch.get_job(job_id) is not None
+    before = env_with_started_scheduler.sch.get_job(job_id)
+    assert before is not None
 
     commits = []
     real_commit = SASession.commit
@@ -1020,4 +1025,8 @@ def test_get_single_monitor_is_read_only(env_with_started_scheduler):
     with patch.object(SASession, "commit", spying_commit):
         assert env_with_started_scheduler.client.get(f"/monitors/{mid}").status_code == 200
     assert commits == [], "GET /monitors/{id} must not commit"
-    assert env_with_started_scheduler.sch.get_job(job_id) is not None, "a read must not disarm the live job"
+    after = env_with_started_scheduler.sch.get_job(job_id)
+    assert after is not None, "a read must not disarm the live job"
+    # MemoryJobStore holds Job instances, so a replace_existing re-arm yields a NEW object — identity
+    # catches a silent re-schedule that `is not None` alone would miss (pins the 're-arm' half of the docstring).
+    assert after is before, "a read must not re-arm (replace) the live job"
