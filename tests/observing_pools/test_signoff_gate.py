@@ -25,8 +25,16 @@ def _env(host=None, signoff_path=None):
 
 @pytest.mark.parametrize("host", [None, "", "127.0.0.1", "localhost", "LOCALHOST", "::1", "127.0.0.5", "  127.0.0.1  "])
 def test_loopback_and_unset_never_raise(host, tmp_path):
-    # No sign-off file exists, yet a loopback/unset bind is a pure no-op (byte-for-byte unchanged).
-    enforce_nonloopback_signoff(_env(host=host, signoff_path=tmp_path / "nope.jsonl"))
+    """Loopback/unset is a PURE no-op — proven by the absence of side effects, not merely the
+    absence of a raise: the caller's env mapping is unmutated, no sign-off file is created at the
+    configured path, and the filesystem around it stays untouched."""
+    signoff_path = tmp_path / "nope.jsonl"
+    env = _env(host=host, signoff_path=signoff_path)
+    before = dict(env)
+    assert enforce_nonloopback_signoff(env) is None
+    assert env == before, "the no-op path must not mutate the caller's env mapping"
+    assert not signoff_path.exists(), "the no-op path must never create the sign-off file"
+    assert list(tmp_path.iterdir()) == [], "the no-op path must leave the filesystem untouched"
 
 
 def test_non_loopback_without_signoff_raises_naming_19_path_and_command(tmp_path):
