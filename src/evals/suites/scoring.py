@@ -6,7 +6,11 @@
 - a missing REQUIRED component excludes the entry (None), never scores it 0;
 - the F2 bootstrap imputes absent serenity at the graded-only median (neutral),
   never favorably, and drops it uniformly when zero graded;
-- degenerate/rank-inverting weight configs are rejected.
+- degenerate/rank-inverting weight configs are rejected;
+- the B1 risk haircut (v3-*-rh1) is pass^k deterministic, matches an independent
+  piecewise-linear reference, is monotone non-decreasing in σ (risk never lifts a
+  rank — bullish/neutral/bearish alike), and stays bounded (adjusted ∈ [0,100],
+  haircut ≤ 20).
 No DB, no LLM — pure functions called with in-memory fixtures.
 """
 
@@ -23,9 +27,72 @@ from src.observing_pools.scoring import (
     FORMULA_5COMP,
     validate_weights,
 )
+from src.quant.volatility import apply_risk_haircut, haircut_points
 
 _SUITE = "scoring"
 _VALUE_KEYS = COMPONENT_ANALYST_KEYS["value_investor"]
+
+# σ grid spanning every B1 band (below 0.15, both linear ramps, and the >=0.50 cap),
+# incl. the band edges 0.15/0.30/0.50 where continuity must hold.
+_SIGMA_GRID = (0.0, 0.05, 0.15, 0.2249, 0.30, 0.40, 0.50, 0.80, 1.5)
+
+
+def _ref_haircut_points(sigma: float) -> float:
+    """Independent piecewise-linear reference for ``haircut_points`` — generic
+    breakpoint interpolation (NOT the implementation's hardcoded branches), so a
+    drift in the shipped bands diverges from this recomputed intent."""
+    breakpoints = ((0.15, 0.0), (0.30, 10.0), (0.50, 20.0))
+    if sigma <= breakpoints[0][0]:
+        return 0.0
+    if sigma >= breakpoints[-1][0]:
+        return 20.0
+    for (x0, y0), (x1, y1) in zip(breakpoints, breakpoints[1:]):
+        if x0 <= sigma < x1:
+            return y0 + (y1 - y0) * (sigma - x0) / (x1 - x0)
+    return 20.0  # unreachable given the guards above
+
+
+def _haircut_deterministic_and_referenced(rec: Recorder) -> bool:
+    """pass^k determinism + an independent piecewise-linear reference (intent, not
+    behavior): each σ yields the same adjusted value twice, ``haircut_points``
+    matches the recomputed reference, and adjusted is the clamped subtraction."""
+    for sigma in _SIGMA_GRID:
+        a, _ = apply_risk_haircut(70.0, sigma)
+        b, _ = apply_risk_haircut(70.0, sigma)
+        h = haircut_points(sigma)
+        if a != b:
+            return False
+        if abs(h - _ref_haircut_points(sigma)) > 1e-9:
+            return False
+        if a != max(0.0, min(100.0, 70.0 - h)):
+            return False
+    rec.record("haircut_ref", grid=len(_SIGMA_GRID))
+    return True
+
+
+def _haircut_monotone_in_sigma(rec: Recorder) -> bool:
+    """Risk never improves a rank: over increasing σ the adjusted value is
+    non-increasing — for bullish (80), neutral (50), and bearish (20) momentum."""
+    for momentum in (80.0, 50.0, 20.0):
+        adjusted = [apply_risk_haircut(momentum, s)[0] for s in _SIGMA_GRID]
+        if any(adjusted[i + 1] > adjusted[i] + 1e-12 for i in range(len(adjusted) - 1)):
+            rec.record("monotonicity", momentum=momentum, adjusted=adjusted, ok=False)
+            return False
+    rec.record("monotonicity", ok=True)
+    return True
+
+
+def _haircut_bounds_respected(rec: Recorder) -> bool:
+    """Adjusted always in [0, 100]; the haircut itself never exceeds 20 pts."""
+    for momentum in (0.0, 20.0, 50.0, 80.0, 100.0):
+        for sigma in _SIGMA_GRID:
+            adjusted, audit = apply_risk_haircut(momentum, sigma)
+            if not (0.0 <= adjusted <= 100.0):
+                return False
+            if not (0.0 <= audit["haircut_points"] <= 20.0):
+                return False
+    rec.record("bounds", ok=True)
+    return True
 
 
 def _composite_deterministic_and_correct(rec: Recorder) -> bool:
@@ -117,4 +184,7 @@ def build() -> list[EvalCase]:
         EvalCase("required_gate_excludes_not_zeroes", _SUITE, CodeGrader("scoring.required_gate_excludes_not_zeroes", _required_gate_excludes_not_zeroes)),
         EvalCase("bootstrap_no_reward_for_absent_evidence", _SUITE, CodeGrader("scoring.bootstrap_no_reward_for_absent_evidence", _bootstrap_no_reward_for_absent_evidence)),
         EvalCase("weight_validation_rejects_degenerate", _SUITE, CodeGrader("scoring.weight_validation_rejects_degenerate", _weight_validation_rejects_degenerate)),
+        EvalCase("haircut_deterministic_and_referenced", _SUITE, CodeGrader("scoring.haircut_deterministic_and_referenced", _haircut_deterministic_and_referenced), trials=5, target=TARGET_REGRESSION, description="B1 haircut pass^k consistency + independent reference"),
+        EvalCase("haircut_monotone_in_sigma", _SUITE, CodeGrader("scoring.haircut_monotone_in_sigma", _haircut_monotone_in_sigma)),
+        EvalCase("haircut_bounds_respected", _SUITE, CodeGrader("scoring.haircut_bounds_respected", _haircut_bounds_respected)),
     ]
