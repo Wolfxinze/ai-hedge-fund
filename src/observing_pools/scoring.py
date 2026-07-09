@@ -19,7 +19,7 @@ COMPONENT_WEIGHTS: dict[str, float] = {
     "platform_fit": 0.25,  # classifier confidence (§9.5)
     "value_investor": 0.30,  # Buffett/Munger/Graham/Pabrai/Fisher/Lynch/Damodaran/Valuation/Fundamentals
     "innovation_growth": 0.20,  # Cathie Wood + Growth Analyst
-    "risk_adjusted_momentum": 0.10,  # Technical/Sentiment/News/Burry/Druckenmiller (momentum-only; risk haircut DEFERRED — see PRD §11.2/§22; I1: no risk_manager import)
+    "risk_adjusted_momentum": 0.10,  # Technical/Sentiment/News/Burry/Druckenmiller (momentum-only by default; haircut applied only under v3-4comp-rh1/v3-5comp-rh1 — see PRD §11.2/§22; default flip to rh1 deferred; I1: no risk_manager import)
     "serenity_bottleneck": 0.15,  # Serenity record, gated by evidence grade (§9.6)
 }
 
@@ -31,8 +31,29 @@ REQUIRED: frozenset[str] = frozenset({"platform_fit", "value_investor"})
 FORMULA_4COMP = "v3-4comp"
 FORMULA_5COMP = "v3-5comp"
 
+# Ship-dark rh1 versions (parent PRD "risk haircut B1 banded subtractive"): the
+# haircut is applied ONLY under these; default stays FORMULA_4COMP until a
+# follow-up flip. build_components/composite treat each exactly as its base.
+FORMULA_4COMP_RH1 = "v3-4comp-rh1"
+FORMULA_5COMP_RH1 = "v3-5comp-rh1"
+
+# rh1 version -> base version, for component-key selection and the serenity
+# bootstrap. A version absent from this map (incl. unknown/garbage) maps to
+# itself, preserving pre-rh1 fallback behavior.
+_RH1_BASE_VERSION: dict[str, str] = {
+    FORMULA_4COMP_RH1: FORMULA_4COMP,
+    FORMULA_5COMP_RH1: FORMULA_5COMP,
+}
+
 # The four components present in the pre-Serenity (v3-4comp) composite.
 _FOURCOMP_KEYS = ("platform_fit", "value_investor", "innovation_growth", "risk_adjusted_momentum")
+
+
+def base_formula_version(formula_version: str) -> str:
+    """Map an rh1 formula version to the base version it must behave exactly as
+    for component-key selection and composite treatment. Non-rh1 (including
+    unknown) versions map to themselves."""
+    return _RH1_BASE_VERSION.get(formula_version, formula_version)
 
 
 class AgentSignal(StrEnum):
@@ -87,7 +108,7 @@ def build_components(
     For v3-4comp the serenity component is omitted entirely (Phase 5 design);
     for v3-5comp all five are included (serenity value may be None → bootstrap).
     """
-    keys = _FOURCOMP_KEYS if formula_version == FORMULA_4COMP else tuple(COMPONENT_WEIGHTS)
+    keys = _FOURCOMP_KEYS if base_formula_version(formula_version) == FORMULA_4COMP else tuple(COMPONENT_WEIGHTS)
     return {k: (weights[k], values.get(k)) for k in keys}
 
 
@@ -106,7 +127,7 @@ def composite(
     """
     comps = dict(components)  # copy — never mutate the caller's mapping
 
-    if formula_version == FORMULA_5COMP and "serenity_bottleneck" in comps:
+    if base_formula_version(formula_version) == FORMULA_5COMP and "serenity_bottleneck" in comps:
         weight, value = comps["serenity_bottleneck"]
         if value is None:
             if pool_serenity_median is None:
