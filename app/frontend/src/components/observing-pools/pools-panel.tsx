@@ -1,5 +1,5 @@
-import { AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { AlertTriangle, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 
 import { Badge } from '@/components/ui/badge';
 import {
@@ -17,6 +17,7 @@ import {
   observingPoolsApi,
   PoolEntry,
   PoolResponse,
+  RefreshError,
   RefreshRun,
 } from '@/services/observing-pools-api';
 
@@ -91,6 +92,19 @@ export function PoolsPanel() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshStatus, setRefreshStatus] = useState<string | null>(null);
+  const mounted = useRef(true);
+  // cancelRefreshRef holds the cancel fn for any in-flight handleRefresh call so the
+  // platform-change effect can abort a stale-platform re-fetch before it writes state.
+  const cancelRefreshRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   // Platform list is fetched once; the pool detail reloads on platform change.
   useEffect(() => {
@@ -106,28 +120,72 @@ export function PoolsPanel() {
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
+  // Fetch pool entries + refresh-run provenance for a platform. Returns a promise so a manual
+  // refresh can await the re-fetch; `cancelled` guards against a stale platform switch.
+  const loadPool = useCallback((platformKey: string, cancelled: () => boolean) => {
     setLoading(true);
     setError(null);
     setExpanded(new Set());
-    Promise.all([
-      observingPoolsApi.getPool(platform),
+    return Promise.all([
+      observingPoolsApi.getPool(platformKey),
       observingPoolsApi.listRefreshRuns(10).catch(() => [] as RefreshRun[]),
     ])
       .then(([poolResponse, runList]) => {
-        if (cancelled) return;
+        if (cancelled()) return;
         setPool(poolResponse);
         setRuns(runList);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (!cancelled()) setError(err instanceof Error ? err.message : String(err));
       })
-      .finally(() => !cancelled && setLoading(false));
+      .finally(() => !cancelled() && setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Cancel any in-flight handleRefresh re-fetch that belongs to the old platform.
+    cancelRefreshRef.current?.();
+    cancelRefreshRef.current = null;
+    setRefreshStatus(null);
+    loadPool(platform, () => cancelled);
     return () => {
       cancelled = true;
     };
-  }, [platform]);
+  }, [platform, loadPool]);
+
+  // Trigger a live refresh, then re-fetch pool + runs on success. 409/503 surface distinct,
+  // user-readable inline messages (never a raw lock-contention/DB string).
+  const handleRefresh = useCallback(() => {
+    cancelRefreshRef.current?.(); // cancel any prior in-flight refresh
+    let cancelled = false;
+    cancelRefreshRef.current = () => {
+      cancelled = true;
+    };
+    setRefreshing(true);
+    setRefreshStatus(null);
+    const platformAtClick = platform; // snapshot — platform may change while fetch is in-flight
+    observingPoolsApi
+      .triggerRefresh(platformAtClick)
+      .then(() => {
+        if (cancelled || !mounted.current) return;
+        setRefreshStatus(t('observingPools.refreshTriggered'));
+        return loadPool(platformAtClick, () => cancelled);
+      })
+      .catch((err: unknown) => {
+        if (cancelled || !mounted.current) return;
+        if (err instanceof RefreshError && err.status === 409) {
+          setRefreshStatus(t('observingPools.refreshInProgress'));
+        } else if (err instanceof RefreshError && err.status === 503) {
+          setRefreshStatus(t('observingPools.refreshUnavailable'));
+        } else {
+          setRefreshStatus(t('observingPools.refreshFailed'));
+        }
+      })
+      .finally(() => {
+        cancelRefreshRef.current = null;
+        if (!cancelled && mounted.current) setRefreshing(false);
+      });
+  }, [platform, loadPool, t]);
 
   const toggle = useCallback((ticker: string) => {
     setExpanded((prev) => {
@@ -160,6 +218,20 @@ export function PoolsPanel() {
             </option>
           ))}
         </select>
+        <button
+          type="button"
+          onClick={handleRefresh}
+          disabled={refreshing || loading}
+          className="inline-flex h-9 items-center gap-1.5 rounded-md border border-border bg-background px-3 text-sm transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <RefreshCw className={cn('size-4', refreshing && 'animate-spin')} aria-hidden="true" />
+          {refreshing ? t('observingPools.refreshing') : t('observingPools.refresh')}
+        </button>
+        {refreshStatus && (
+          <span role="status" className="text-xs text-muted-foreground">
+            {refreshStatus}
+          </span>
+        )}
         {pool && (
           <span className="text-xs text-muted-foreground">
             {t('observingPools.rankedCount', { count: String(pool.count) })}

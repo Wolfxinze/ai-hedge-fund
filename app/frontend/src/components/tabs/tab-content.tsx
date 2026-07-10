@@ -2,7 +2,7 @@ import { useTabsContext } from '@/contexts/tabs-context';
 import { useI18n } from '@/i18n/use-i18n';
 import { cn, formatKeyboardShortcut } from '@/lib/utils';
 import { TabService } from '@/services/tab-service';
-import { FileText, FolderOpen } from 'lucide-react';
+import { FolderOpen } from 'lucide-react';
 import { useEffect } from 'react';
 
 interface TabContentProps {
@@ -58,10 +58,6 @@ export function TabContent({ className }: TabContentProps) {
                 settingsShortcut: '⌘,',
               })}
             </div>
-          </div>
-          <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground/70">
-            <FileText size={14} />
-            <span>{t('tabs.flowsOpenInTabs')}</span>
           </div>
         </div>
       </div>

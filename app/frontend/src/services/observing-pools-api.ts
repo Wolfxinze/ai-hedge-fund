@@ -89,6 +89,28 @@ export interface RefreshRun {
   error: string | null;
 }
 
+// POST /observing-pools/refresh response (app/backend/routes/observing_pools.py). A live (non
+// dry-run) trigger persists a run and returns its id; summary mirrors RefreshRunSummary.
+export interface RefreshResult {
+  id: number | null;
+  status: string;
+  platform_key: string;
+  dry_run: boolean;
+  summary: RefreshRunSummary | null;
+  error: string | null;
+}
+
+// Error thrown by triggerRefresh carrying the HTTP status, so the caller can distinguish a 409
+// (refresh already in progress) or 503 (DB locked) from a generic failure without string-matching.
+export class RefreshError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'RefreshError';
+    this.status = status;
+  }
+}
+
 // ---- Serenity --------------------------------------------------------------
 
 export interface SerenityRecord {
@@ -197,6 +219,20 @@ export const observingPoolsApi = {
 
   listRefreshRuns: (limit = 25): Promise<RefreshRun[]> =>
     getJson(`/observing-pools/refresh-runs?limit=${limit}`),
+
+  // Trigger one live (persisted) refresh for a platform. Throws RefreshError with the HTTP status
+  // on failure so 409 (already refreshing) / 503 (DB locked) can be surfaced distinctly.
+  triggerRefresh: async (platformKey: string): Promise<RefreshResult> => {
+    const response = await fetch(`${API_BASE_URL}/observing-pools/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform_key: platformKey, dry_run: false }),
+    });
+    if (!response.ok) {
+      throw new RefreshError(response.status, await errorMessage(response));
+    }
+    return response.json() as Promise<RefreshResult>;
+  },
 
   getSerenity: (ticker: string, limit = 50): Promise<SerenityRecord[]> =>
     getJson(`/serenity/research/${encodeURIComponent(ticker)}?limit=${limit}`),
