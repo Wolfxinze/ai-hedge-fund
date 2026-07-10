@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronDown, ChevronRight } from 'lucide-react';
+import { AlertTriangle, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
 import { Fragment, useCallback, useEffect, useState } from 'react';
 
 import { Badge } from '@/components/ui/badge';
@@ -17,6 +17,7 @@ import {
   observingPoolsApi,
   PoolEntry,
   PoolResponse,
+  RefreshError,
   RefreshRun,
 } from '@/services/observing-pools-api';
 
@@ -91,6 +92,8 @@ export function PoolsPanel() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshStatus, setRefreshStatus] = useState<string | null>(null);
 
   // Platform list is fetched once; the pool detail reloads on platform change.
   useEffect(() => {
@@ -106,28 +109,58 @@ export function PoolsPanel() {
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
+  // Fetch pool entries + refresh-run provenance for a platform. Returns a promise so a manual
+  // refresh can await the re-fetch; `cancelled` guards against a stale platform switch.
+  const loadPool = useCallback((platformKey: string, cancelled: () => boolean) => {
     setLoading(true);
     setError(null);
     setExpanded(new Set());
-    Promise.all([
-      observingPoolsApi.getPool(platform),
+    return Promise.all([
+      observingPoolsApi.getPool(platformKey),
       observingPoolsApi.listRefreshRuns(10).catch(() => [] as RefreshRun[]),
     ])
       .then(([poolResponse, runList]) => {
-        if (cancelled) return;
+        if (cancelled()) return;
         setPool(poolResponse);
         setRuns(runList);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (!cancelled()) setError(err instanceof Error ? err.message : String(err));
       })
-      .finally(() => !cancelled && setLoading(false));
+      .finally(() => !cancelled() && setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRefreshStatus(null);
+    loadPool(platform, () => cancelled);
     return () => {
       cancelled = true;
     };
-  }, [platform]);
+  }, [platform, loadPool]);
+
+  // Trigger a live refresh, then re-fetch pool + runs on success. 409/503 surface distinct,
+  // user-readable inline messages (never a raw lock-contention/DB string).
+  const handleRefresh = useCallback(() => {
+    setRefreshing(true);
+    setRefreshStatus(null);
+    observingPoolsApi
+      .triggerRefresh(platform)
+      .then(() => {
+        setRefreshStatus(t('observingPools.refreshTriggered'));
+        return loadPool(platform, () => false);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof RefreshError && err.status === 409) {
+          setRefreshStatus(t('observingPools.refreshInProgress'));
+        } else if (err instanceof RefreshError && err.status === 503) {
+          setRefreshStatus(t('observingPools.refreshUnavailable'));
+        } else {
+          setRefreshStatus(t('observingPools.refreshFailed'));
+        }
+      })
+      .finally(() => setRefreshing(false));
+  }, [platform, loadPool, t]);
 
   const toggle = useCallback((ticker: string) => {
     setExpanded((prev) => {
@@ -160,6 +193,20 @@ export function PoolsPanel() {
             </option>
           ))}
         </select>
+        <button
+          type="button"
+          onClick={handleRefresh}
+          disabled={refreshing}
+          className="inline-flex h-9 items-center gap-1.5 rounded-md border border-border bg-background px-3 text-sm transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <RefreshCw className={cn('size-4', refreshing && 'animate-spin')} aria-hidden="true" />
+          {refreshing ? t('observingPools.refreshing') : t('observingPools.refresh')}
+        </button>
+        {refreshStatus && (
+          <span role="status" className="text-xs text-muted-foreground">
+            {refreshStatus}
+          </span>
+        )}
         {pool && (
           <span className="text-xs text-muted-foreground">
             {t('observingPools.rankedCount', { count: String(pool.count) })}
