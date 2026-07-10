@@ -205,7 +205,7 @@ def test_none_momentum_skips_price_fetch_and_is_not_degraded(session):
         return _LOW_VOL
 
     stub = _stub({"MSFT": 90, "NVDA": 90}, drop_momentum_for=frozenset({"MSFT"}))
-    refresh_pool(session, _rh1_config(), stub, end_date="2026-06-12", fetch_closes=fetch)
+    run = refresh_pool(session, _rh1_config(), stub, end_date="2026-06-12", fetch_closes=fetch)
     session.commit()
 
     assert "MSFT" not in called  # spend discipline — no fetch when momentum is None
@@ -213,3 +213,5 @@ def test_none_momentum_skips_price_fetch_and_is_not_degraded(session):
     audit = _entry(session, "MSFT").score_breakdown["components"]["risk_adjusted_momentum"]["risk_haircut"]
     assert audit["raw_momentum"] is None
     assert audit["degraded"] is False
+    # None-momentum skips the haircut entirely — must NOT count as a degraded ticker
+    assert run.status == m.RefreshRunStatus.COMPLETE.value
