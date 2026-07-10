@@ -4,8 +4,8 @@ These pin the corrected ledger against regression to the pre-reconcile (inverted
 - §22 lists #66 as the ONLY open issue; #23 CLOSED (Phase-11 deferral, NOT counsel sign-off),
   #25 shipped→#66, #43 wontfix-by-design/CLOSED, #51 shipped, naming-drift RESOLVED.
 - §11.5 drops "Deliberately deferred (issue #43)" for a wontfix-by-design/CLOSED framing.
-- §11.2 marks the risk_adjusted_momentum "− risk haircut" as DEFERRED (momentum-only today); the
-  scoring.py comment is trued-up to match.
+- §11.2 describes the risk_adjusted_momentum "− risk haircut" as IMPLEMENTED ship-dark (B1 banded
+  subtractive under v3-*-rh1; default v3-4comp stays momentum-only); the scoring.py comment names rh1.
 - §8.2 corrects the DRY-seam clause: app/backend/services/graph.py wraps resilient_analyst_node
   INLINE (it does not use the get_analyst_nodes() seam).
 
@@ -57,11 +57,15 @@ def test_s22_marks_51_shipped_and_naming_resolved():
     assert "RESOLVED" in s22, "§22 must mark the v3-*/v4-* naming drift RESOLVED"
 
 
-def test_s22_adds_risk_haircut_deferred_bullet_with_i1():
+def test_s22_risk_haircut_shipped_ship_dark_with_i1():
     s22 = _section("## §22", _PRD.read_text())
     low = s22.lower()
-    assert "risk" in low and "haircut" in low, "§22 must carry a Risk-Manager haircut deferred bullet"
-    assert "i1" in low and "no risk_manager import" in low, "the haircut bullet must note I1 (signal-only)"
+    assert "risk" in low and "haircut" in low, "§22 must carry a Risk-Manager haircut bullet"
+    # shipped ship-dark this epic; the remaining open item is the human-gated default flip
+    assert "ship-dark" in low or "ship dark" in low, "§22 must state the haircut shipped ship-dark"
+    assert "flip" in low, "§22 must name the default flip as the remaining open item"
+    # I1 sentence retained (a §22 guard requires it — stripping it must go RED)
+    assert "i1" in low and "no risk_manager import" in low, "the haircut bullet must retain I1 (signal-only)"
 
 
 # ── §11.5 wontfix reframe ───────────────────────────────────────────────────
@@ -72,19 +76,22 @@ def test_s115_drops_deliberately_deferred_for_wontfix():
     assert "#43" in s115 and "wontfix" in s115.lower(), "§11.5 must frame #43 as wontfix-by-design/CLOSED"
 
 
-# ── §11.2 risk-haircut truth-up ─────────────────────────────────────────────
-def test_s112_marks_risk_haircut_deferred():
+# ── §11.2 risk-haircut truth-up (implemented, ship-dark) ────────────────────
+def test_s112_marks_risk_haircut_implemented_ship_dark():
     s112 = _section("### §11.2", _PRD.read_text())
     low = s112.lower()
-    assert "momentum-only" in low, "§11.2 must state the component is momentum-only today"
-    assert "deferred" in low, "§11.2 must mark the risk haircut DEFERRED"
+    # the default is STILL momentum-only (ship-dark) ...
+    assert "momentum-only" in low, "§11.2 must state the default component stays momentum-only"
+    # ... but the B1 haircut is now applied under the new rh1 formula versions
+    assert "rh1" in low, "§11.2 must state the haircut applies under the v3-*-rh1 formula versions"
+    assert "b1" in low, "§11.2 must name the B1 banded-subtractive haircut design"
 
 
 def test_scoring_comment_trued_up_to_match():
     src = _SCORING.read_text()
-    # the risk_adjusted_momentum weight line must no longer imply an applied haircut
+    # the risk_adjusted_momentum weight line must name the rh1 formula versions the haircut applies under
     line = next(l for l in src.splitlines() if '"risk_adjusted_momentum"' in l)
-    assert "deferred" in line.lower(), "scoring.py risk_adjusted_momentum comment must mark the haircut DEFERRED"
+    assert "rh1" in line.lower(), "scoring.py risk_adjusted_momentum comment must name the rh1 formula versions"
 
 
 # ── §8.2 DRY-seam accuracy ──────────────────────────────────────────────────

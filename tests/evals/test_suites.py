@@ -97,3 +97,16 @@ def test_no_trade_grader_catches_planted_forbidden_import(monkeypatch):
     monkeypatch.setattr(nt, "_FORBIDDEN_IMPORT_SUBSTRINGS", ("analysts",))
     result, _ = run_case(_case("no_trade", "modules_have_no_direct_trade_imports"))
     assert result.passed is False
+
+
+def test_no_trade_grader_scans_quant_module(monkeypatch):
+    import src.evals.suites.no_trade as nt
+
+    # The new quant-package scan must genuinely inspect src/quant/volatility.py.
+    # `statistics` is imported ONLY by the quant module (none of the observing_pools
+    # scanned modules import it), so treating it as forbidden leaves the
+    # observing_pools scan clean and forces the QUANT scan to bite -> proving a
+    # PLANTED `import src.agents.risk_manager` in volatility.py would be caught.
+    monkeypatch.setattr(nt, "_FORBIDDEN_IMPORT_SUBSTRINGS", ("statistics",))
+    result, _ = run_case(_case("no_trade", "modules_have_no_direct_trade_imports"))
+    assert result.passed is False

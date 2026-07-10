@@ -9,9 +9,13 @@ bootstrap (no reward for absent evidence).
 import pytest
 
 from src.observing_pools.scoring import (
+    COMPONENT_WEIGHTS,
     FORMULA_4COMP,
+    FORMULA_4COMP_RH1,
     FORMULA_5COMP,
+    FORMULA_5COMP_RH1,
     AgentSignal,
+    base_formula_version,
     build_components,
     composite,
     mean_or_none,
@@ -154,3 +158,69 @@ class TestComposite:
         # Present REQUIRED but total present weight 0 → None, not ZeroDivisionError.
         comps = {"platform_fit": (0.0, 90.0), "value_investor": (0.0, 40.0)}
         assert composite(comps, pool_serenity_median=None, formula_version=FORMULA_4COMP) is None
+
+
+class TestBaseFormulaVersion:
+    def test_rh1_maps_to_base(self):
+        assert base_formula_version(FORMULA_4COMP_RH1) == FORMULA_4COMP
+        assert base_formula_version(FORMULA_5COMP_RH1) == FORMULA_5COMP
+
+    def test_non_rh1_versions_map_to_themselves(self):
+        assert base_formula_version(FORMULA_4COMP) == FORMULA_4COMP
+        assert base_formula_version(FORMULA_5COMP) == FORMULA_5COMP
+
+    def test_unknown_version_maps_to_itself(self):
+        # Pin current (pre-rh1) fallback behavior — do not silently widen acceptance.
+        assert base_formula_version("garbage") == "garbage"
+
+
+class TestRh1BuildComponents:
+    def test_4comp_rh1_treated_exactly_as_4comp(self):
+        comps_rh1 = build_components(_VALUES, formula_version=FORMULA_4COMP_RH1)
+        comps_base = build_components(_VALUES, formula_version=FORMULA_4COMP)
+        assert set(comps_rh1) == set(comps_base)
+        assert "serenity_bottleneck" not in comps_rh1
+
+    def test_5comp_rh1_treated_exactly_as_5comp(self):
+        vals = {**_VALUES, "serenity_bottleneck": 40.0}
+        comps_rh1 = build_components(vals, formula_version=FORMULA_5COMP_RH1)
+        comps_base = build_components(vals, formula_version=FORMULA_5COMP)
+        assert set(comps_rh1) == set(comps_base) == set(COMPONENT_WEIGHTS)
+
+
+class TestRh1Composite:
+    def test_4comp_rh1_composite_matches_4comp(self):
+        comps_rh1 = build_components(_VALUES, formula_version=FORMULA_4COMP_RH1)
+        result_rh1 = composite(comps_rh1, pool_serenity_median=None, formula_version=FORMULA_4COMP_RH1)
+        assert result_rh1 == pytest.approx(_FOURCOMP_EXPECTED)
+
+    def test_5comp_rh1_serenity_bootstrap_fires_zero_graded(self):
+        # Same F2 bootstrap as plain 5comp: zero graded (median None) -> serenity
+        # dropped uniformly -> identical to the 4-comp result.
+        vals = {**_VALUES, "serenity_bottleneck": None}
+        comps = build_components(vals, formula_version=FORMULA_5COMP_RH1)
+        result = composite(comps, pool_serenity_median=None, formula_version=FORMULA_5COMP_RH1)
+        assert result == pytest.approx(_FOURCOMP_EXPECTED)
+
+    def test_5comp_rh1_serenity_bootstrap_fires_imputes_median(self):
+        vals = {**_VALUES, "serenity_bottleneck": None}
+        comps = build_components(vals, formula_version=FORMULA_5COMP_RH1)
+        result = composite(comps, pool_serenity_median=70.0, formula_version=FORMULA_5COMP_RH1)
+        assert result == pytest.approx(67.0)  # same as test_5comp_serenity_missing_imputes_median
+
+
+class TestUnknownFormulaVersionUnchanged:
+    def test_unknown_version_still_gets_fivecomp_keys(self):
+        # Pin the current fallback: anything != FORMULA_4COMP (base-mapped) gets
+        # the full 5-key set — an unknown version must not silently narrow it.
+        comps = build_components(_VALUES, formula_version="garbage")
+        assert set(comps) == set(COMPONENT_WEIGHTS)
+
+    def test_unknown_version_does_not_trigger_serenity_bootstrap(self):
+        vals = {**_VALUES, "serenity_bottleneck": None}
+        comps = build_components(vals, formula_version="garbage")
+        # Only FORMULA_5COMP(-rh1) fires the bootstrap; an unknown version leaves
+        # serenity_bottleneck present-but-None, excluding it from `present`.
+        result = composite(comps, pool_serenity_median=70.0, formula_version="garbage")
+        four = composite(build_components(_VALUES, formula_version=FORMULA_4COMP), pool_serenity_median=None, formula_version=FORMULA_4COMP)
+        assert result == pytest.approx(four)
