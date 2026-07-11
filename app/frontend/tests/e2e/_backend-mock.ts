@@ -42,6 +42,14 @@ const REFRESH_RUNS = [
   },
 ];
 
+// POST /observing-pools/refresh success body (services/observing-pools-api.RefreshResult). A live
+// (non-dry-run) trigger persists a run and returns COMPLETE; exported so a per-test held-promise
+// route can resolve with the same contract shape.
+export const REFRESH_RESULT = {
+  id: 2, status: 'COMPLETE', platform_key: 'ai', dry_run: false,
+  summary: { ranked: 2, data_unavailable: 1, candidates: 10, top_tickers: ['NVDA', 'XYZ'] }, error: null,
+};
+
 const REPORTS = [
   {
     id: 1, monitor_id: 1, ticker: 'NVDA', generated_at: '2026-06-21', label: 'thesis-supportive',
@@ -86,6 +94,9 @@ export async function mockBackend(page: Page): Promise<void> {
 
     if (pathname === '/innovation-platforms') return json(PLATFORMS);
     if (pathname === '/observing-pools/refresh-runs') return json(REFRESH_RUNS);
+    // POST /observing-pools/refresh — must precede the /observing-pools/ wildcard so a live refresh
+    // gets the RefreshResult shape, not the empty-pool catch-all.
+    if (route.request().method() === 'POST' && pathname === '/observing-pools/refresh') return json(REFRESH_RESULT);
     if (pathname === '/observing-pools/ai') return json(POOL_AI);
     if (pathname.startsWith('/observing-pools/')) return json({ platform_key: pathname.split('/').pop(), count: 0, entries: [] });
     if (pathname === '/opportunity-reports') return json(REPORTS);

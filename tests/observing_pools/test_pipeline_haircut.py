@@ -15,7 +15,7 @@ from sqlalchemy.orm import sessionmaker
 import src.storage.models as m
 from src.observing_pools.agents_bridge import COMPONENT_ANALYST_KEYS
 from src.observing_pools.pipeline import RefreshConfig, refresh_pool
-from src.observing_pools.scoring import FORMULA_4COMP, FORMULA_4COMP_RH1
+from src.observing_pools.scoring import FORMULA_4COMP, FORMULA_4COMP_RH1, FORMULA_5COMP_RH1
 
 UNIVERSE = "data/universes/ai_seed.csv"
 _MOMENTUM_KEYS = set(COMPONENT_ANALYST_KEYS["risk_adjusted_momentum"])
@@ -215,3 +215,44 @@ def test_none_momentum_skips_price_fetch_and_is_not_degraded(session):
     assert audit["degraded"] is False
     # None-momentum skips the haircut entirely — must NOT count as a degraded ticker
     assert run.status == m.RefreshRunStatus.COMPLETE.value
+
+
+# ── FORMULA_5COMP_RH1: the 5-component rh1 formula also applies the haircut ────
+
+
+def test_rh1_5comp_applies_haircut(session):
+    """The 5-component rh1 formula (v3-5comp-rh1) applies the haircut identically to
+    the 4-comp path — the wiring keys off is_rh1, not the component count."""
+    run = refresh_pool(session, _rh1_config(formula_version=FORMULA_5COMP_RH1), _stub({"NVDA": 90}), end_date="2026-06-12", fetch_closes=lambda *a: _HIGH_VOL)
+    session.commit()
+
+    assert run.status == m.RefreshRunStatus.COMPLETE.value
+    assert run.composite_formula_version == FORMULA_5COMP_RH1
+    nvda = _entry(session, "NVDA")
+    audit = nvda.score_breakdown["components"]["risk_adjusted_momentum"]["risk_haircut"]
+    assert audit["degraded"] is False
+    assert audit["haircut_points"] == 20.0  # _HIGH_VOL σ ≥ 0.5 → cap, same as 4-comp path
+    assert nvda.risk_adjusted_momentum_score == 75.0  # 95 − 20
+
+
+def test_mixed_degrade_partial_run_only_flags_degraded_tickers(session):
+    """One ticker with clean high-vol closes (haircut applied, not degraded) and one
+    with too-short history (degraded → zero haircut): the run is PARTIAL, only the
+    short-history name is flagged, and its momentum is preserved (never fabricate σ)."""
+    called: list[str] = []
+
+    def fetch(ticker: str, end_date: str) -> list[float]:
+        called.append(ticker)
+        return _HIGH_VOL if ticker == "NVDA" else [100.0, 101.0]
+
+    stub = _stub({"NVDA": 90, "MSFT": 90})  # identical momentum → isolates the degrade path
+    run = refresh_pool(session, _rh1_config(), stub, end_date="2026-06-12", fetch_closes=fetch)
+    session.commit()
+
+    assert "NVDA" in called  # high-vol fetch executed
+    assert "MSFT" in called  # short-history fetch executed — spend discipline holds
+    assert run.status == m.RefreshRunStatus.PARTIAL.value
+    assert "MSFT" in run.fetch_errors["haircut_degraded_tickers"]
+    assert "NVDA" not in run.fetch_errors["haircut_degraded_tickers"]
+    assert _entry(session, "NVDA").risk_adjusted_momentum_score < 95.0  # clean haircut applied
+    assert _entry(session, "MSFT").risk_adjusted_momentum_score == 95.0  # degraded → momentum preserved

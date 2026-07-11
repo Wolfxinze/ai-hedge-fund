@@ -1,6 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
 
-import { mockBackend, STORED_DISCLAIMER } from './_backend-mock';
+import { mockBackend, REFRESH_RESULT, STORED_DISCLAIMER } from './_backend-mock';
+
+// Exact backend URL for the live-refresh POST — per-test overrides use it so Playwright's LIFO
+// route ordering fires them before the base mockBackend handler.
+const REFRESH_URL = 'http://localhost:8000/observing-pools/refresh';
 
 // Order-placement verbs — a research-only UI must expose NONE of these as a control.
 const TRADE_ACTION = /\b(buy|sell|short|cover|trade|order|execute|place order)\b/i;
@@ -93,5 +97,79 @@ test.describe('Observing Pools — research-only invariants', () => {
     await expect(page.getByText(/Grade: B/)).toBeVisible();
     await expect(page.getByText('hold')).toBeVisible();
     await expect(page.getByText(new RegExp(STORED_DISCLAIMER))).toBeVisible();
+  });
+
+  // Issue #76 — E2E coverage for the Pools Refresh button (shipped in PR #75). `name: 'Refresh'`
+  // is a substring match, so the same locator resolves the button as its label flips to "Refreshing…".
+  test('pools refresh: happy path surfaces "Refresh complete."', async ({ page }) => {
+    await openObservingPools(page);
+    const refresh = page.getByRole('button', { name: 'Refresh' });
+    await expect(refresh).toBeEnabled();
+
+    await refresh.click();
+
+    // The role=status region is unique to the refresh feedback; asserts the success i18n string.
+    await expect(page.getByRole('status')).toHaveText('Refresh complete.');
+  });
+
+  test('pools refresh: a 409 surfaces "Refresh already in progress."', async ({ page }) => {
+    await openObservingPools(page);
+    // Registered AFTER mockBackend (beforeEach) → Playwright LIFO fires this override first.
+    await page.route(REFRESH_URL, (route) =>
+      route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'refresh already in progress' }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Refresh' }).click();
+
+    await expect(page.getByRole('status')).toHaveText('Refresh already in progress.');
+    await expect(page.getByRole('button', { name: 'Refresh' })).toBeEnabled(); // must be retryable after 409
+  });
+
+  test('pools refresh: a 503 surfaces "Refresh temporarily unavailable; please try again."', async ({ page }) => {
+    await openObservingPools(page);
+    await page.route(REFRESH_URL, (route) =>
+      route.fulfill({
+        status: 503,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'database is locked' }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Refresh' }).click();
+
+    await expect(page.getByRole('status')).toHaveText('Refresh temporarily unavailable; please try again.');
+    await expect(page.getByRole('button', { name: 'Refresh' })).toBeEnabled(); // must be retryable after 503
+  });
+
+  test('pools refresh: button is disabled while the refresh is in flight', async ({ page }) => {
+    await openObservingPools(page);
+    // Hold the POST response mid-flight via a Promise (no timing/sleep): the button stays disabled
+    // until we release it.
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(REFRESH_URL, async (route) => {
+      await held;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(REFRESH_RESULT),
+      });
+    });
+
+    const refresh = page.getByRole('button', { name: 'Refresh' });
+    await refresh.click();
+    try {
+      await expect(refresh).toBeDisabled(); // in-flight refresh disables the control
+    } finally {
+      release(); // guarantee unblock even if assertion fails — avoids 30s CI hang on regression
+    }
+    await expect(page.getByRole('status')).toHaveText('Refresh complete.');
+    await expect(refresh).toBeEnabled(); // settled → re-enabled
   });
 });
