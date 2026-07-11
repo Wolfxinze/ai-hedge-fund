@@ -101,15 +101,27 @@ test.describe('Observing Pools — research-only invariants', () => {
 
   // Issue #76 — E2E coverage for the Pools Refresh button (shipped in PR #75). `name: 'Refresh'`
   // is a substring match, so the same locator resolves the button as its label flips to "Refreshing…".
-  test('pools refresh: happy path surfaces "Refresh complete."', async ({ page }) => {
+  test('pools refresh: happy path surfaces "Refresh complete." and re-fetches the pool', async ({ page }) => {
+    // Count GET /observing-pools/ai — loadPool's endpoint. A successful refresh calls loadPool
+    // AGAIN (pools-panel handleRefresh), so this must strictly increase; the count pins the
+    // re-fetch branch (asserting a rendered cell can't fail, since it renders on the first load too).
+    let poolGets = 0;
+    page.on('request', (req) => {
+      const u = new URL(req.url());
+      if (req.method() === 'GET' && u.host === 'localhost:8000' && u.pathname === '/observing-pools/ai') poolGets += 1;
+    });
+
     await openObservingPools(page);
     const refresh = page.getByRole('button', { name: 'Refresh' });
     await expect(refresh).toBeEnabled();
+    const getsBeforeRefresh = poolGets; // ≥1 from the initial load
 
     await refresh.click();
 
     // The role=status region is unique to the refresh feedback; asserts the success i18n string.
     await expect(page.getByRole('status')).toHaveText('Refresh complete.');
+    // The post-refresh loadPool re-fetch fired a fresh GET — strictly more than before the click.
+    await expect.poll(() => poolGets).toBeGreaterThan(getsBeforeRefresh);
   });
 
   test('pools refresh: a 409 surfaces "Refresh already in progress."', async ({ page }) => {
@@ -166,10 +178,27 @@ test.describe('Observing Pools — research-only invariants', () => {
     await refresh.click();
     try {
       await expect(refresh).toBeDisabled(); // in-flight refresh disables the control
+      await expect(refresh).toHaveText('Refreshing…'); // label flips while in-flight
     } finally {
       release(); // guarantee unblock even if assertion fails — avoids 30s CI hang on regression
     }
     await expect(page.getByRole('status')).toHaveText('Refresh complete.');
     await expect(refresh).toBeEnabled(); // settled → re-enabled
+  });
+
+  test('pools refresh: a generic error surfaces "Refresh failed."', async ({ page }) => {
+    await openObservingPools(page);
+    await page.route(REFRESH_URL, (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'internal server error' }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Refresh' }).click();
+
+    await expect(page.getByRole('status')).toHaveText('Refresh failed.');
+    await expect(page.getByRole('button', { name: 'Refresh' })).toBeEnabled(); // must be retryable
   });
 });
