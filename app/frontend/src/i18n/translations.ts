@@ -380,6 +380,9 @@ export const en = {
   'observingPools.daily': 'Daily',
   'observingPools.weekly': 'Weekly',
   'observingPools.monthly': 'Monthly',
+  'observingPools.rawMomentum': 'Raw momentum',
+  'observingPools.haircut': 'Haircut',
+  'observingPools.volatility': 'Volatility',
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -766,6 +769,9 @@ export const zhCN: Record<TranslationKey, string> = {
   'observingPools.daily': '每日',
   'observingPools.weekly': '每周',
   'observingPools.monthly': '每月',
+  'observingPools.rawMomentum': '原始动量',
+  'observingPools.haircut': '风险扣减',
+  'observingPools.volatility': '年化波动率',
 };
 
 export const translations = {

@@ -21,6 +21,7 @@ from sqlalchemy.pool import StaticPool
 import src.storage.models as m
 from src.observing_pools import pool_lock as pl
 from src.observing_pools.pipeline import RefreshConfig
+from src.observing_pools.scoring import FORMULA_4COMP_RH1
 from src.observing_pools.pool_lock import (
     acquire_pool_lock,
     PoolLockContendedError,
@@ -148,7 +149,7 @@ def _stub_run(**over):
 def test_refresh_pool_locked_acquires_runs_releases(factory, monkeypatch):
     seen = {}
 
-    def stub_refresh(session, config, run_analysts, *, end_date, provider_name="yfinance"):
+    def stub_refresh(session, config, run_analysts, *, end_date, provider_name="yfinance", fetch_closes=None):
         seen["platform"] = config.platform_key
         # lock row must be present + committed DURING the refresh (the long op runs holding the claim row)
         assert session.get(PoolLock, "ai") is not None
@@ -184,6 +185,48 @@ def test_refresh_pool_locked_second_caller_contended(factory, monkeypatch):
         acquire_pool_lock(s, "ai", "other", clock=pl._utc_now, ttl_seconds=3600)
     with pytest.raises(PoolLockContendedError):
         refresh_pool_locked(cfg, lambda *a, **k: ({}, {}), end_date="2026-01-01", run_id="A", session_factory=factory)
+
+
+def _bullish_run(tickers, selected, end_date):
+    """All-bullish committee → every candidate has a non-None momentum component, so the
+    rh1 haircut path actually consults fetch_closes (spend-disciplined skip only on None)."""
+    signals = {f"{k}_agent": {t: {"signal": "bullish", "confidence": 90, "reasoning": "stub"} for t in tickers} for k in selected}
+    return signals, {"calls": 1}
+
+
+def _closes60():
+    closes = [100.0]
+    for i in range(60):
+        closes.append(closes[-1] * (1.02 if i % 2 == 0 else 0.98))
+    return closes
+
+
+def test_refresh_pool_locked_forwards_fetch_closes_for_rh1(factory):
+    """An rh1 formula_version routed through refresh_pool_locked MUST forward the injected
+    fetch_closes into refresh_pool; otherwise refresh_pool fails loud (rh1 + fetch_closes=None
+    → ValueError). Uses the REAL refresh_pool (not stubbed) so the forward is proven end-to-end:
+    the run does NOT raise ValueError AND the fake fetch_closes is actually invoked by the
+    haircut path (not merely accepted and ignored). Fails before this task's change."""
+    called: list[str] = []
+
+    def fake_fetch(ticker, end_date):
+        called.append(ticker)
+        return _closes60()
+
+    cfg = RefreshConfig(
+        platform_key="ai",
+        universe_csv="data/universes/ai_seed.csv",
+        top_n=30,
+        token_budget=100_000,
+        formula_version=FORMULA_4COMP_RH1,
+    )
+    outcome = refresh_pool_locked(
+        cfg, _bullish_run, end_date="2026-06-12", run_id="A", session_factory=factory, fetch_closes=fake_fetch
+    )
+    assert outcome.status in ("complete", "partial")  # ran to completion — no rh1 ValueError
+    assert called  # the fake reached refresh_pool's haircut path and was actually invoked
+    with factory() as s:
+        assert s.get(PoolLock, "ai") is None  # lock released after the run
 
 
 # ── real concurrency + error-typing ──────────────────────────────────────────

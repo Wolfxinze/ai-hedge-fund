@@ -33,6 +33,54 @@ const POOL_AI = {
   ],
 };
 
+// Robotics pool exercises the rh1 risk-haircut audit in the per-agent breakdown (score_breakdown.
+// components.risk_adjusted_momentum.risk_haircut). RHF = clean haircut (degraded:false, volatility
+// present → renders raw momentum / haircut / volatility%, NO degraded badge); RHT = degraded
+// haircut (price data missing → volatility null, degraded badge shown); NOH = no risk_haircut key
+// at all (the default-formula case → NO haircut UI). No degraded AGENTS, so the only "Degraded"
+// badge on screen comes from a risk_haircut, keeping the badge assertions unambiguous.
+const POOL_ROBOTICS = {
+  platform_key: 'robotics',
+  count: 3,
+  entries: [
+    {
+      ticker: 'RHF', platform_key: 'robotics', status: 'complete', rank: 1,
+      composite_score: 78.0, composite_formula_version: 'v3-5comp-rh1',
+      components: { platform_fit: 88, value_investor: 72, innovation_growth: 84, risk_adjusted_momentum: 58, serenity_bottleneck: 66 },
+      score_breakdown: {
+        components: {
+          risk_adjusted_momentum: {
+            value: 58,
+            risk_haircut: { raw_momentum: 70, haircut_points: 12, annualized_volatility: 0.42, degraded: false, policy: 'B1' },
+          },
+        },
+      },
+      rationale: 'Momentum haircut applied.',
+    },
+    {
+      ticker: 'RHT', platform_key: 'robotics', status: 'complete', rank: 2,
+      composite_score: 71.0, composite_formula_version: 'v3-5comp-rh1',
+      components: { platform_fit: 90, value_investor: 75, innovation_growth: 80, risk_adjusted_momentum: 65, serenity_bottleneck: 70 },
+      score_breakdown: {
+        components: {
+          risk_adjusted_momentum: {
+            value: 65,
+            risk_haircut: { raw_momentum: 65, haircut_points: 0, annualized_volatility: null, degraded: true, policy: 'B1' },
+          },
+        },
+      },
+      rationale: 'Price data too short to compute volatility.',
+    },
+    {
+      ticker: 'NOH', platform_key: 'robotics', status: 'complete', rank: 3,
+      composite_score: 60.0, composite_formula_version: 'v3-4comp',
+      components: { platform_fit: 60, value_investor: 55, innovation_growth: 50, risk_adjusted_momentum: 80, serenity_bottleneck: 45 },
+      score_breakdown: { components: { risk_adjusted_momentum: { value: 80 } } },
+      rationale: 'Default momentum-only formula, no haircut.',
+    },
+  ],
+};
+
 const REFRESH_RUNS = [
   {
     id: 1, started_at: null, completed_at: '2026-06-21', status: 'PARTIAL', provider_name: 'yfinance',
@@ -98,6 +146,7 @@ export async function mockBackend(page: Page): Promise<void> {
     // gets the RefreshResult shape, not the empty-pool catch-all.
     if (route.request().method() === 'POST' && pathname === '/observing-pools/refresh') return json(REFRESH_RESULT);
     if (pathname === '/observing-pools/ai') return json(POOL_AI);
+    if (pathname === '/observing-pools/robotics') return json(POOL_ROBOTICS);
     if (pathname.startsWith('/observing-pools/')) return json({ platform_key: pathname.split('/').pop(), count: 0, entries: [] });
     if (pathname === '/opportunity-reports') return json(REPORTS);
     if (pathname === '/monitors') return json(MONITORS);

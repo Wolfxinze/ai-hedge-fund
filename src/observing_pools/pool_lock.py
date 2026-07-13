@@ -27,7 +27,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
-from src.observing_pools.pipeline import refresh_pool, RefreshConfig, RunAnalysts
+from src.observing_pools.pipeline import FetchCloses, refresh_pool, RefreshConfig, RunAnalysts
 from src.storage import session_scope
 from src.storage.models import PoolLock
 
@@ -147,6 +147,7 @@ def refresh_pool_locked(
     clock: Callable[[], datetime] = _utc_now,
     ttl_seconds: int | None = None,
     provider_name: str = "yfinance",
+    fetch_closes: FetchCloses | None = None,
 ) -> RefreshOutcome:
     """Canonical PoolLock-guarded refresh used by the CLI, the scheduler job, and (future) the
     API. Claim → run ``refresh_pool`` OUTSIDE the lock transaction → fenced release in a finally
@@ -156,7 +157,12 @@ def refresh_pool_locked(
         fence = acquire_pool_lock(lock_s, config.platform_key, run_id, clock=clock, ttl_seconds=ttl_seconds)
     try:
         with session_factory() as s:
-            run = refresh_pool(s, config, run_analysts, end_date=end_date, provider_name=provider_name)
+            # Forward fetch_closes only when supplied: refresh_pool's own default is None, so omitting
+            # it is semantically identical for existing callers (fetch_closes=None) — keeping their
+            # refresh_pool call byte-identical to before and not breaking test doubles / adapters that
+            # don't accept the kwarg. Only an rh1 caller that injects a real callable forwards it.
+            extra = {"fetch_closes": fetch_closes} if fetch_closes is not None else {}
+            run = refresh_pool(s, config, run_analysts, end_date=end_date, provider_name=provider_name, **extra)
             outcome = RefreshOutcome(status=run.status, error=run.error, summary=run.summary, fence=fence, db_run_id=run.id)
         return outcome
     finally:

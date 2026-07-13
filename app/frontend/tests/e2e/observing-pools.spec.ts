@@ -201,4 +201,47 @@ test.describe('Observing Pools — research-only invariants', () => {
     await expect(page.getByRole('status')).toHaveText('Refresh failed.');
     await expect(page.getByRole('button', { name: 'Refresh' })).toBeEnabled(); // must be retryable
   });
+
+  // rh1 risk-haircut audit (score_breakdown.components.risk_adjusted_momentum.risk_haircut). The
+  // robotics pool is scored under an rh1 formula and carries the audit; the "ai" default pool does
+  // not. RHF = clean haircut, RHT = degraded (missing price data), NOH = default formula (no audit).
+  test('pools breakdown: renders risk-haircut audit fields and a Degraded badge only for a degraded haircut', async ({ page }) => {
+    await openObservingPools(page);
+    await page.getByLabel('Platform').selectOption('robotics');
+    const rhfRow = page.getByRole('row', { name: /RHF/ });
+    await expect(rhfRow).toBeVisible();
+
+    // Expand the clean-haircut entry: pre-haircut momentum, haircut points, and volatility % render.
+    await rhfRow.getByRole('button', { name: 'Toggle score breakdown' }).click();
+    await expect(page.getByText(/Raw momentum: 70\.0/)).toBeVisible();
+    await expect(page.getByText(/Haircut: -12\.0/)).toBeVisible();
+    await expect(page.getByText('Volatility: 42.0%')).toBeVisible();
+    // degraded:false ⇒ NO Degraded badge (the robotics pool has no degraded agents, so the only
+    // possible "Degraded" badge on screen comes from a risk_haircut).
+    await expect(page.getByText('Degraded', { exact: true })).toHaveCount(0);
+
+    // Expand the degraded-haircut entry (price data too short): the Degraded badge now shows, and
+    // the null volatility renders as "—", never 0 or a fabricated percentage.
+    await page.getByRole('row', { name: /RHT/ }).getByRole('button', { name: 'Toggle score breakdown' }).click();
+    await expect(page.getByText('Degraded', { exact: true })).toHaveCount(1);
+    await expect(page.getByText('Volatility: —')).toBeVisible();
+  });
+
+  test('pools breakdown: no risk-haircut UI for an entry scored under the default (no-haircut) formula', async ({ page }) => {
+    await openObservingPools(page);
+    await page.getByLabel('Platform').selectOption('robotics');
+    const nohRow = page.getByRole('row', { name: /NOH/ });
+    await expect(nohRow).toBeVisible();
+
+    // Expand ONLY the no-haircut entry: none of the haircut labels or a placeholder dash render for
+    // a field that simply does not apply under the default momentum-only formula.
+    await nohRow.getByRole('button', { name: 'Toggle score breakdown' }).click();
+    // The breakdown IS shown (positive control: the risk_adjusted_momentum component value renders)…
+    await expect(page.getByText('risk adjusted momentum', { exact: false })).toBeVisible();
+    // …but with no haircut audit fields at all.
+    await expect(page.getByText(/Raw momentum/)).toHaveCount(0);
+    await expect(page.getByText(/Haircut:/)).toHaveCount(0);
+    await expect(page.getByText(/Volatility/)).toHaveCount(0);
+    await expect(page.getByText('Degraded', { exact: true })).toHaveCount(0);
+  });
 });

@@ -15,6 +15,13 @@ from functools import partial
 
 from src.observing_pools.pipeline import DEFAULT_UNIVERSE, refresh_pool, RefreshConfig
 from src.observing_pools.platforms import init_platforms, PLATFORM_KEYS
+from src.observing_pools.scoring import (
+    FORMULA_4COMP,
+    FORMULA_4COMP_RH1,
+    FORMULA_5COMP,
+    FORMULA_5COMP_RH1,
+    base_formula_version,
+)
 from src.observing_pools.pool_lock import (
     PoolLockContendedError,
     PoolLockDatabaseLockedError,
@@ -61,18 +68,28 @@ def _cmd_refresh(args: argparse.Namespace) -> int:
         universe_csv=args.universe,
         top_n=args.top,
         token_budget=args.budget,
+        formula_version=args.formula_version,
         dry_run=args.dry_run,
     )
+    # rh1 versions (ship-dark risk haircut) need a price provider for the volatility
+    # haircut — mirror pipeline.refresh_pool's exact is_rh1 test. The default
+    # (v3-4comp) path omits fetch_closes entirely, so its behavior is unchanged.
+    is_rh1 = base_formula_version(args.formula_version) != args.formula_version
+    fetch_kwargs: dict = {}
+    if is_rh1:
+        from src.observing_pools.price_bridge import fetch_closes_via_provider
+
+        fetch_kwargs["fetch_closes"] = fetch_closes_via_provider
     Base.metadata.create_all(bind=engine)
     if config.dry_run:
         # dry-run mutates nothing — including no pool_locks row — so it runs UNLOCKED.
         with session_scope() as s:
-            run = refresh_pool(s, config, runner, end_date=args.end_date)
+            run = refresh_pool(s, config, runner, end_date=args.end_date, **fetch_kwargs)
             status, error, summary = run.status, run.error, (run.summary or {})
     else:
         # PoolLock-guarded: same-platform contention serialises (exit 3); different platforms proceed.
         try:
-            outcome = refresh_pool_locked(config, runner, end_date=args.end_date, run_id=f"cli-{os.getpid()}")
+            outcome = refresh_pool_locked(config, runner, end_date=args.end_date, run_id=f"cli-{os.getpid()}", **fetch_kwargs)
         except PoolLockContendedError as exc:
             print(f"refresh: {exc} — another refresh for '{args.platform}' is already in progress", file=sys.stderr)
             return 3
@@ -123,6 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ref.add_argument("--end-date", default=date.today().isoformat())
     p_ref.add_argument("--model", default="gpt-4.1")
     p_ref.add_argument("--provider", default="OpenAI")
+    p_ref.add_argument(
+        "--formula-version",
+        choices=[FORMULA_4COMP, FORMULA_5COMP, FORMULA_4COMP_RH1, FORMULA_5COMP_RH1],
+        default=FORMULA_4COMP,
+        help="composite formula version; rh1 variants apply the ship-dark risk haircut LOCALLY (research only)",
+    )
     p_ref.add_argument("--dry-run", action="store_true", help="compute + print, persist nothing")
     p_ref.set_defaults(func=_cmd_refresh)
 

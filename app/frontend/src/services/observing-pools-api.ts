@@ -23,9 +23,23 @@ export interface AgentBreakdown {
   degraded: boolean;
 }
 
+// B1 risk-haircut audit (src/quant/volatility.apply_risk_haircut). Present ONLY on the
+// risk_adjusted_momentum component and ONLY when the pool was scored under an rh1 formula version
+// (v3-4comp-rh1 / v3-5comp-rh1). Absent under the default momentum-only formula, so it is optional
+// everywhere and must never be assumed present. `degraded` ⇔ price data was missing/too short
+// (annualized_volatility null, haircut_points 0 — momentum passed through un-haircut).
+export interface RiskHaircut {
+  raw_momentum: number | null;
+  haircut_points: number;
+  annualized_volatility: number | null;
+  degraded: boolean;
+  policy: string;
+}
+
 export interface ComponentBreakdown {
   value: number | null;
   agents?: Record<string, AgentBreakdown>;
+  risk_haircut?: RiskHaircut;
 }
 
 export interface ScoreBreakdown {
