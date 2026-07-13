@@ -1,10 +1,11 @@
 import { expect, test, type Page } from '@playwright/test';
 
-import { mockBackend, REFRESH_RESULT, STORED_DISCLAIMER } from './_backend-mock';
+import { DISCOVER_RESULT, mockBackend, REFRESH_RESULT, STORED_DISCLAIMER } from './_backend-mock';
 
-// Exact backend URL for the live-refresh POST — per-test overrides use it so Playwright's LIFO
+// Exact backend URLs for the POST endpoints — per-test overrides use them so Playwright's LIFO
 // route ordering fires them before the base mockBackend handler.
 const REFRESH_URL = 'http://localhost:8000/observing-pools/refresh';
+const DISCOVER_URL = 'http://localhost:8000/serenity/discover';
 
 // Order-placement verbs — a research-only UI must expose NONE of these as a control.
 const TRADE_ACTION = /\b(buy|sell|short|cover|trade|order|execute|place order)\b/i;
@@ -97,6 +98,113 @@ test.describe('Observing Pools — research-only invariants', () => {
     await expect(page.getByText(/Grade: B/)).toBeVisible();
     await expect(page.getByText('hold')).toBeVisible();
     await expect(page.getByText(new RegExp(STORED_DISCLAIMER))).toBeVisible();
+  });
+
+  // Serenity Discover flow (POST /serenity/discover): fills the form, asserts the request carries
+  // the user's inputs, and pins the success/partial/error/in-flight surfaces.
+  async function openSerenityDiscover(page: Page) {
+    await openObservingPools(page);
+    await page.getByRole('tab', { name: 'Serenity' }).click();
+    await page.getByLabel('Ticker').fill('AAPL');
+    await page.getByLabel('Theme').fill('AI infra');
+    await page.getByLabel('Keywords (comma-separated)').fill('HBM, supply');
+  }
+
+  test('serenity discover: happy path posts the form, reports the built records, and re-fetches research', async ({ page }) => {
+    let discoverBody: Record<string, unknown> | null = null;
+    page.on('request', (req) => {
+      if (req.method() === 'POST' && req.url() === DISCOVER_URL) discoverBody = req.postDataJSON();
+    });
+
+    await openSerenityDiscover(page);
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    // Success summary comes from the API response (1 record, 3 references).
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toBeVisible();
+    // The follow-up GET re-fetched research: the record card renders with the stored disclaimer.
+    await expect(page.getByText(/Grade: B/)).toBeVisible();
+    await expect(page.getByText(new RegExp(STORED_DISCLAIMER))).toBeVisible();
+    // The POST carried the user's inputs, keywords split on commas, and the full 5-dim scorecard.
+    expect(discoverBody).not.toBeNull();
+    expect(discoverBody!.ticker).toBe('AAPL');
+    expect(discoverBody!.theme).toBe('AI infra');
+    expect(discoverBody!.keywords).toEqual(['HBM', 'supply']);
+    expect(Object.keys(discoverBody!.scorecard as Record<string, number>)).toHaveLength(5);
+  });
+
+  test('serenity discover: partial source failures are surfaced, not swallowed', async ({ page }) => {
+    await openSerenityDiscover(page);
+    await page.route(DISCOVER_URL, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...DISCOVER_RESULT, source_errors: { federal_register: 'Timeout' } }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toBeVisible();
+    await expect(page.getByText('Some sources failed: federal_register')).toBeVisible();
+  });
+
+  test('serenity discover: an upstream failure surfaces "Discovery failed." and stays retryable', async ({ page }) => {
+    await openSerenityDiscover(page);
+    await page.route(DISCOVER_URL, (route) =>
+      route.fulfill({
+        status: 502,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: "all evidence sources errored for 'AAPL'" }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    await expect(page.getByText(/Discovery failed\./)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Discover' })).toBeEnabled(); // retryable after failure
+  });
+
+  test('serenity discover: button is disabled while the discovery is in flight', async ({ page }) => {
+    await openSerenityDiscover(page);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(DISCOVER_URL, async (route) => {
+      await held;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(DISCOVER_RESULT),
+      });
+    });
+
+    const discover = page.getByRole('button', { name: 'Discover' });
+    await discover.click();
+    try {
+      await expect(discover).toBeDisabled(); // in-flight discovery disables the control
+      await expect(discover).toHaveText('Discovering…'); // label flips while in-flight
+    } finally {
+      release(); // guarantee unblock even if assertion fails — avoids 30s CI hang on regression
+    }
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toBeVisible();
+    await expect(discover).toBeEnabled(); // settled → re-enabled
+  });
+
+  test('serenity discover: button is disabled until ticker, theme, and keywords are all filled', async ({ page }) => {
+    await openObservingPools(page);
+    await page.getByRole('tab', { name: 'Serenity' }).click();
+    const discover = page.getByRole('button', { name: 'Discover' });
+    await expect(discover).toBeDisabled(); // nothing filled
+
+    await page.getByLabel('Ticker').fill('AAPL');
+    await expect(discover).toBeDisabled(); // theme + keywords still missing
+    await page.getByLabel('Theme').fill('AI infra');
+    await expect(discover).toBeDisabled(); // keywords still missing
+    await page.getByLabel('Keywords (comma-separated)').fill(' , ');
+    await expect(discover).toBeDisabled(); // only blank keywords
+    await page.getByLabel('Keywords (comma-separated)').fill('HBM');
+    await expect(discover).toBeEnabled();
   });
 
   // Issue #76 — E2E coverage for the Pools Refresh button (shipped in PR #75). `name: 'Refresh'`

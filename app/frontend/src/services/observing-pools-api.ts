@@ -141,6 +141,29 @@ export interface SerenityRecord {
   disclaimer_version: string;
 }
 
+// POST /serenity/discover request/response (app/backend/routes/observing_pools.py). The scorecard
+// is the caller's judgment — the 5 bottleneck dimensions (src/serenity/grading.SCORECARD_DIMENSIONS),
+// each 0-4; the backend rejects anything else with a 422 (never defaulted server-side).
+export interface SerenityDiscoverRequest {
+  ticker: string;
+  theme: string;
+  keywords: string[];
+  platform_key?: string | null;
+  chain_layer?: string | null;
+  hypothesis?: string | null;
+  sources?: string[];
+  max_per_source?: number;
+  scorecard: Record<string, number>;
+}
+
+export interface SerenityDiscoverResult {
+  ticker: string;
+  records: SerenityRecord[];
+  reference_count: number;
+  source_errors: Record<string, string>; // {source: exc_type} — degraded sources, surfaced not swallowed
+  failed_groups: number;
+}
+
 // ---- Monitors & reports ----------------------------------------------------
 
 export interface Monitor {
@@ -250,6 +273,12 @@ export const observingPoolsApi = {
 
   getSerenity: (ticker: string, limit = 50): Promise<SerenityRecord[]> =>
     getJson(`/serenity/research/${encodeURIComponent(ticker)}?limit=${limit}`),
+
+  // Trigger evidence discovery (EDGAR + Federal Register fan-out) and build research records —
+  // the API twin of `python -m src.serenity discover`. Research-only; can take several seconds
+  // (outbound fetches to allowlisted hosts happen server-side).
+  discoverSerenity: (request: SerenityDiscoverRequest): Promise<SerenityDiscoverResult> =>
+    sendJson('/serenity/discover', 'POST', request),
 
   listMonitors: (limit = 50): Promise<Monitor[]> => getJson(`/monitors?limit=${limit}`),
 

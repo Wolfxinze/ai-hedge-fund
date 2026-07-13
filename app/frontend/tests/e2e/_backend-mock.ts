@@ -128,6 +128,16 @@ const SERENITY_AAPL = [
   },
 ];
 
+// POST /serenity/discover success body (services/observing-pools-api.SerenityDiscoverResult) —
+// exported so per-test overrides (partial sources, held promise) can reuse the contract shape.
+export const DISCOVER_RESULT = {
+  ticker: 'AAPL',
+  records: SERENITY_AAPL,
+  reference_count: 3,
+  source_errors: {},
+  failed_groups: 0,
+};
+
 const API_KEYS_LIST = [
   { id: 1, provider: 'OPENAI_API_KEY', is_set: true, masked_tail: 'ab12', is_active: true, created_at: '2026-06-21' },
 ];
@@ -150,6 +160,7 @@ export async function mockBackend(page: Page): Promise<void> {
     if (pathname.startsWith('/observing-pools/')) return json({ platform_key: pathname.split('/').pop(), count: 0, entries: [] });
     if (pathname === '/opportunity-reports') return json(REPORTS);
     if (pathname === '/monitors') return json(MONITORS);
+    if (route.request().method() === 'POST' && pathname === '/serenity/discover') return json(DISCOVER_RESULT);
     if (pathname.startsWith('/serenity/research/')) return json(SERENITY_AAPL);
     if (pathname === '/api-keys') return json(API_KEYS_LIST);
     return json([]);
