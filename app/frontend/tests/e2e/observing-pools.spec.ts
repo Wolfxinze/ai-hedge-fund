@@ -129,7 +129,13 @@ test.describe('Observing Pools — research-only invariants', () => {
     expect(discoverBody!.ticker).toBe('AAPL');
     expect(discoverBody!.theme).toBe('AI infra');
     expect(discoverBody!.keywords).toEqual(['HBM', 'supply']);
-    expect(Object.keys(discoverBody!.scorecard as Record<string, number>)).toHaveLength(5);
+    expect(Object.keys(discoverBody!.scorecard as Record<string, number>).sort()).toEqual([
+      'capacity_expansion',
+      'certification_strictness',
+      'purity_precision',
+      'supplier_concentration',
+      'validation_cycle',
+    ]);
   });
 
   test('serenity discover: partial source failures are surfaced, not swallowed', async ({ page }) => {
@@ -204,6 +210,52 @@ test.describe('Observing Pools — research-only invariants', () => {
     await page.getByLabel('Keywords (comma-separated)').fill(' , ');
     await expect(discover).toBeDisabled(); // only blank keywords
     await page.getByLabel('Keywords (comma-separated)').fill('HBM');
+    await expect(discover).toBeEnabled();
+  });
+
+  test('serenity discover: rolled-back evidence groups are surfaced alongside the success summary', async ({ page }) => {
+    await openSerenityDiscover(page);
+    await page.route(DISCOVER_URL, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...DISCOVER_RESULT, failed_groups: 1 }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    // The success summary and the failed-groups warning coexist — neither overwrites the other.
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toBeVisible();
+    await expect(page.getByText('Failed to persist 1 evidence group(s); see server logs.')).toBeVisible();
+  });
+
+  test('serenity discover: a no-evidence result reports the no-evidence copy', async ({ page }) => {
+    await openSerenityDiscover(page);
+    await page.route(DISCOVER_URL, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...DISCOVER_RESULT, records: [], reference_count: 0 }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    await expect(page.getByText('No allowlisted evidence found for this ticker.')).toBeVisible();
+  });
+
+  test('serenity discover: clearing a scorecard dimension disables Discover; a valid 0-4 integer re-enables', async ({ page }) => {
+    await openSerenityDiscover(page); // ticker + theme + keywords filled → scorecard is the only gate
+    const discover = page.getByRole('button', { name: 'Discover' });
+    await expect(discover).toBeEnabled(); // scorecard prefilled with valid values
+
+    // Clearing a dimension is not a silent 0 — it is invalid and disables the control.
+    await page.getByLabel('Supplier concentration').fill('');
+    await expect(discover).toBeDisabled();
+
+    // Refilling a valid 0-4 integer re-enables it.
+    await page.getByLabel('Supplier concentration').fill('2');
     await expect(discover).toBeEnabled();
   });
 
@@ -333,6 +385,9 @@ test.describe('Observing Pools — research-only invariants', () => {
     await page.getByRole('row', { name: /RHT/ }).getByRole('button', { name: 'Toggle score breakdown' }).click();
     await expect(page.getByText('Degraded', { exact: true })).toHaveCount(1);
     await expect(page.getByText('Volatility: —')).toBeVisible();
+    // A degraded haircut has haircut_points 0 → render an em dash, never a contradictory "-0.0".
+    await expect(page.getByText('Haircut: —')).toBeVisible();
+    await expect(page.getByText(/Haircut: -0/)).toHaveCount(0);
   });
 
   test('pools breakdown: no risk-haircut UI for an entry scored under the default (no-haircut) formula', async ({ page }) => {

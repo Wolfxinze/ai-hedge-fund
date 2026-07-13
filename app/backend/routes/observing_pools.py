@@ -242,7 +242,7 @@ class DiscoverRequest(BaseModel):
     platform_key: str | None = None
     chain_layer: str | None = None
     hypothesis: str | None = None
-    sources: list[str] = Field(default_factory=lambda: list(_DISCOVER_SOURCES))
+    sources: list[str] = Field(default_factory=lambda: list(_DISCOVER_SOURCES), max_length=len(_DISCOVER_SOURCES))
     max_per_source: int = Field(3, ge=1, le=10)
     scorecard: dict[str, int]
 
@@ -277,17 +277,22 @@ def discover_serenity(body: DiscoverRequest, db: Session = Depends(get_db), gath
     unknown_sources = [s for s in body.sources if s not in _DISCOVER_SOURCES]
     if unknown_sources:
         raise HTTPException(status_code=422, detail=f"unknown source(s) {unknown_sources} (expected subset of {list(_DISCOVER_SOURCES)})")
+    # Order-preserving dedup: a repeated source name would otherwise re-invoke the builder and let
+    # gather's per-source counts[name] overwrite the first pass — plus it amplifies outbound requests.
+    sources = tuple(dict.fromkeys(body.sources))
     if set(body.scorecard) != set(SCORECARD_DIMENSIONS) or any(not 0 <= v <= 4 for v in body.scorecard.values()):
         raise HTTPException(status_code=422, detail=f"scorecard must map exactly {list(SCORECARD_DIMENSIONS)} to ints 0-4")
 
     try:
-        result = gatherer(ticker, keywords=keywords, sources=tuple(body.sources), max_per_source=body.max_per_source)
+        result = gatherer(ticker, keywords=keywords, sources=sources, max_per_source=body.max_per_source)
     except Exception:
         # Fail loud in the log WITH the traceback, but never leak the raw exception to the client.
         logger.exception("serenity discover: gather failed ticker=%s", ticker)
         raise HTTPException(status_code=502, detail=f"evidence gathering failed for '{ticker}'")
-    if result.errors and not any(result.counts.values()):
-        # Every attempted source errored — an upstream FAILURE, not an empty result (CLI parity).
+    if result.errors and all(s in result.errors for s in sources):
+        # EVERY requested source errored — an upstream FAILURE, not an empty result (CLI parity).
+        # (A source that legitimately returns zero refs while another errors falls through to a 200
+        # with records=[] + source_errors populated: "no evidence found + one degraded source".)
         raise HTTPException(status_code=502, detail=f"all evidence sources errored for '{ticker}': {result.errors}")
 
     # One record per source group, each committed independently so a later group failing neither

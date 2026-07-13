@@ -164,6 +164,25 @@ def test_refresh_pool_locked_acquires_runs_releases(factory, monkeypatch):
         assert s.get(PoolLock, "ai") is None  # released after the run
 
 
+def test_refresh_pool_locked_omits_fetch_closes_kwarg_when_none(factory, monkeypatch):
+    """pool_lock deliberately OMITS fetch_closes from the refresh_pool call when it is None so
+    legacy doubles/adapters that never accepted the kwarg keep working. This stub's signature does
+    NOT accept fetch_closes (mirrors the real call minus that kwarg); the run must still succeed,
+    proving the kwarg is omitted — not passed as None. Fails (TypeError: unexpected keyword
+    argument 'fetch_closes') if pool_lock ever passes fetch_closes unconditionally."""
+
+    def stub_refresh(session, config, run_analysts, *, end_date, provider_name="yfinance"):
+        return _stub_run()
+
+    monkeypatch.setattr(pl, "refresh_pool", stub_refresh)
+    cfg = RefreshConfig(platform_key="ai", universe_csv="x.csv")
+    # fetch_closes not passed → defaults to None → the kwarg must be omitted from the refresh call.
+    outcome = refresh_pool_locked(cfg, lambda *a, **k: ({}, {}), end_date="2026-01-01", run_id="A", session_factory=factory)
+    assert outcome.status == "complete"
+    with factory() as s:
+        assert s.get(PoolLock, "ai") is None  # released after the run
+
+
 def test_refresh_pool_locked_releases_on_exception(factory, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("refresh exploded")

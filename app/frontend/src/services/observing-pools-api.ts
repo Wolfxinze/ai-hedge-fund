@@ -219,7 +219,16 @@ export interface MonitorRunResult {
 async function errorMessage(response: Response): Promise<string> {
   try {
     const body = await response.json();
-    if (body && typeof body.detail === 'string') return body.detail;
+    const detail = body?.detail;
+    if (typeof detail === 'string') return detail;
+    // FastAPI 422 (RequestValidationError) sends detail as an array of {loc, msg, type}. Render the
+    // first item as "<loc.join('.')>: <msg>" so the message names the offending field.
+    if (Array.isArray(detail) && detail.length > 0) {
+      const first = detail[0];
+      const msg = typeof first?.msg === 'string' ? first.msg : undefined;
+      const loc = Array.isArray(first?.loc) ? first.loc.join('.') : undefined;
+      if (msg) return loc ? `${loc}: ${msg}` : msg;
+    }
   } catch {
     // non-JSON body — fall through to the status text
   }

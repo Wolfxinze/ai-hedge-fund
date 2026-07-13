@@ -31,13 +31,24 @@ const DIM_LABEL_KEYS: Record<ScorecardDim, TranslationKey> = {
   purity_precision: 'observingPools.dimPurityPrecision',
 };
 
-const NEUTRAL_SCORECARD: Record<ScorecardDim, number> = {
-  supplier_concentration: 2,
-  validation_cycle: 2,
-  capacity_expansion: 2,
-  certification_strictness: 2,
-  purity_precision: 2,
+// Scorecard values are held as raw strings so an empty field stays empty (never a silent 0) — the
+// backend refuses to default this extreme judgment. Each dim must parse to an integer 0-4 to be valid.
+const NEUTRAL_SCORECARD: Record<ScorecardDim, string> = {
+  supplier_concentration: '2',
+  validation_cycle: '2',
+  capacity_expansion: '2',
+  certification_strictness: '2',
+  purity_precision: '2',
 };
+
+// Returns the parsed integer 0-4 for a raw scorecard input, or null when empty / non-integer /
+// out of range (decimals and NaN are invalid — the backend 422s on anything but an int 0-4).
+function parseDim(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return value >= 0 && value <= 4 ? value : null;
+}
 
 export function SerenityPanel() {
   const { t } = useI18n();
@@ -48,7 +59,7 @@ export function SerenityPanel() {
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState('');
   const [keywords, setKeywords] = useState('');
-  const [scorecard, setScorecard] = useState<Record<ScorecardDim, number>>(NEUTRAL_SCORECARD);
+  const [scorecard, setScorecard] = useState<Record<ScorecardDim, string>>(NEUTRAL_SCORECARD);
   const [discovering, setDiscovering] = useState(false);
   const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
@@ -85,7 +96,9 @@ export function SerenityPanel() {
   };
 
   const parsedKeywords = keywords.split(',').map((k) => k.trim()).filter(Boolean);
-  const canDiscover = Boolean(ticker.trim()) && Boolean(theme.trim()) && parsedKeywords.length > 0;
+  const scorecardValid = SCORECARD_DIMENSIONS.every((dim) => parseDim(scorecard[dim]) !== null);
+  const canDiscover =
+    Boolean(ticker.trim()) && Boolean(theme.trim()) && parsedKeywords.length > 0 && scorecardValid;
 
   const discover = (event: FormEvent) => {
     event.preventDefault();
@@ -94,8 +107,11 @@ export function SerenityPanel() {
     setDiscovering(true);
     setDiscoverMessage(null);
     setDiscoverError(null);
+    const parsedScorecard = Object.fromEntries(
+      SCORECARD_DIMENSIONS.map((dim) => [dim, parseDim(scorecard[dim]) as number]),
+    ) as Record<ScorecardDim, number>;
     observingPoolsApi
-      .discoverSerenity({ ticker: trimmedTicker, theme: theme.trim(), keywords: parsedKeywords, scorecard })
+      .discoverSerenity({ ticker: trimmedTicker, theme: theme.trim(), keywords: parsedKeywords, scorecard: parsedScorecard })
       .then((result) => {
         if (!mounted.current) return;
         setDiscoverMessage(
@@ -103,16 +119,30 @@ export function SerenityPanel() {
             ? t('observingPools.discoverNoEvidence')
             : t('observingPools.discoverBuilt', { count: String(result.records.length), refs: String(result.reference_count) }),
         );
+        // Surface degraded sources AND rolled-back evidence groups together — neither may overwrite
+        // the other, so both warnings render in the discover error area.
+        const warnings: string[] = [];
         const failedSources = Object.keys(result.source_errors);
         if (failedSources.length > 0) {
-          setDiscoverError(t('observingPools.discoverPartial', { sources: failedSources.join(', ') }));
+          warnings.push(t('observingPools.discoverPartial', { sources: failedSources.join(', ') }));
         }
-        // Refresh the records list so the new research is immediately visible.
-        return observingPoolsApi.getSerenity(trimmedTicker).then((refreshed) => {
-          if (!mounted.current) return;
-          setRecords(refreshed);
-          setSearched(true);
-        });
+        if (result.failed_groups > 0) {
+          warnings.push(t('observingPools.discoverGroupsFailed', { count: String(result.failed_groups) }));
+        }
+        if (warnings.length > 0) setDiscoverError(warnings.join(' '));
+        // Refresh the records list so the new research is immediately visible. This is a distinct
+        // fetch: its failure means the LIST failed to load (search error), NOT that discovery failed,
+        // so it gets its own catch and leaves the discover message/warning intact.
+        return observingPoolsApi
+          .getSerenity(trimmedTicker)
+          .then((refreshed) => {
+            if (!mounted.current) return;
+            setRecords(refreshed);
+            setSearched(true);
+          })
+          .catch((err: unknown) => {
+            if (mounted.current) setError(err instanceof Error ? err.message : String(err));
+          });
       })
       .catch((err: unknown) => {
         if (mounted.current) {
@@ -125,8 +155,7 @@ export function SerenityPanel() {
   };
 
   const setDim = (dim: ScorecardDim, raw: string) => {
-    const value = Math.min(4, Math.max(0, Number(raw) || 0));
-    setScorecard((prev) => ({ ...prev, [dim]: value }));
+    setScorecard((prev) => ({ ...prev, [dim]: raw }));
   };
 
   return (
@@ -139,7 +168,13 @@ export function SerenityPanel() {
           <Input
             id="serenity-ticker"
             value={ticker}
-            onChange={(event) => setTicker(event.target.value)}
+            onChange={(event) => {
+              setTicker(event.target.value);
+              // Discover messages are about the previous ticker — clear them so stale success/warning
+              // text doesn't read as being about the newly typed ticker.
+              setDiscoverMessage(null);
+              setDiscoverError(null);
+            }}
             placeholder={t('observingPools.serenityPlaceholder')}
             className="w-48"
           />

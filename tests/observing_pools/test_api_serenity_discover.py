@@ -22,7 +22,7 @@ import app.backend.routes.observing_pools as op_routes
 import src.storage.models as m
 from app.backend.database.connection import get_db
 from app.backend.routes.observing_pools import get_gatherer, router
-from src.serenity.adapters.gather import GatherResult
+from src.serenity.adapters.gather import GatherResult, gather_references
 from src.serenity.grading import SCORECARD_DIMENSIONS
 from src.storage.models import SerenityResearchRecord
 
@@ -266,3 +266,95 @@ def test_discover_empty_keywords_is_422(env, keywords):
 
 def test_discover_blank_theme_is_422(env):
     assert env.client.post("/serenity/discover", json=_body(theme="   ")).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"keywords": ["k"] * 21},  # over the max_length=20 bound
+        {"max_per_source": 0},  # below ge=1
+        {"max_per_source": 11},  # above le=10
+        {"sources": ["edgar", "federal_register", "edgar"]},  # 3 entries > max_length=2
+    ],
+)
+def test_discover_pydantic_bounds_are_422(env, over):
+    assert env.client.post("/serenity/discover", json=_body(**over)).status_code == 422
+
+
+# ── source dedup + forwarding (M1/M6) ────────────────────────────────────────
+
+
+def test_discover_forwards_sources_and_max_per_source(env):
+    # Non-default sources + max_per_source must reach the gatherer verbatim (deduped tuple + int).
+    env.client.post("/serenity/discover", json=_body(sources=["edgar"], max_per_source=7))
+    assert env.calls[0]["sources"] == ("edgar",)
+    assert env.calls[0]["max_per_source"] == 7
+    assert isinstance(env.calls[0]["max_per_source"], int)
+
+
+def test_discover_duplicate_sources_are_deduped(env):
+    # ['edgar','edgar'] must reach the gatherer as ('edgar',) — a repeat would re-invoke the
+    # builder and let gather's per-source counts overwrite the first pass (corrupting the 502 gate).
+    env.client.post("/serenity/discover", json=_body(sources=["edgar", "edgar"]))
+    assert env.calls[0]["sources"] == ("edgar",)
+
+
+# ── honest 502 gating (M2) ───────────────────────────────────────────────────
+
+
+def test_discover_one_errored_other_zero_refs_is_200_not_502(env):
+    # edgar timed out; federal_register legitimately returned zero references. The truth is
+    # "no evidence found + one degraded source", NOT "all sources errored" → 200, not 502.
+    env.set_gatherer(
+        lambda ticker, **kw: _gather_result(
+            references=[],
+            groups=[(_FEDREG_HEADERS, [])],
+            errors={"edgar": "TimeoutError"},
+            counts={"edgar": 0, "federal_register": 0},
+        )
+    )
+    r = env.client.post("/serenity/discover", json=_body())
+    assert r.status_code == 200
+    body = r.json()
+    assert body["records"] == []
+    assert body["source_errors"] == {"edgar": "TimeoutError"}  # degraded source surfaced, not swallowed
+    with contextlib.closing(env.Session()) as s:
+        assert s.query(SerenityResearchRecord).count() == 0
+
+
+def test_discover_every_requested_source_errored_is_502(env):
+    # Both requested sources appear in errors → a genuine upstream failure → 502 (CLI parity).
+    env.set_gatherer(
+        lambda ticker, **kw: _gather_result(
+            references=[],
+            groups=[],
+            errors={"edgar": "TimeoutError", "federal_register": "HTTPError"},
+            counts={"edgar": 0, "federal_register": 0},
+        )
+    )
+    r = env.client.post("/serenity/discover", json=_body())
+    assert r.status_code == 502
+    assert "errored" in r.json()["detail"]
+
+
+# ── passthrough fields (L4) ──────────────────────────────────────────────────
+
+
+def test_discover_chain_layer_and_hypothesis_on_record(env):
+    r = env.client.post(
+        "/serenity/discover",
+        json=_body(chain_layer="advanced-packaging", hypothesis="CoWoS is the binding constraint"),
+    )
+    assert r.status_code == 200
+    for rec in r.json()["records"]:
+        assert rec["chain_layer"] == "advanced-packaging"
+        assert rec["bottleneck_hypothesis"] == "CoWoS is the binding constraint"
+
+
+# ── real dependency wiring (H2) ──────────────────────────────────────────────
+
+
+def test_get_gatherer_returns_real_gather_references():
+    # Every other test overrides get_gatherer; this executes its real body so a rename of
+    # gather_references fails here instead of shipping green and 500ing in production.
+    assert get_gatherer() is gather_references

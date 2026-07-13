@@ -68,7 +68,10 @@ function PerAgentDetail({ entry }: { entry: PoolEntry }) {
                   {t('observingPools.rawMomentum')}: {fmt(component.risk_haircut.raw_momentum, 1)}
                 </span>
                 <span>
-                  {t('observingPools.haircut')}: -{fmt(component.risk_haircut.haircut_points, 1)}
+                  {/* A degraded haircut has haircut_points 0 (momentum passed through un-haircut);
+                      rendering "-0.0" next to the Degraded badge reads as contradictory, so show a dash. */}
+                  {t('observingPools.haircut')}:{' '}
+                  {component.risk_haircut.degraded ? EM_DASH : `-${fmt(component.risk_haircut.haircut_points, 1)}`}
                 </span>
                 <span>
                   {t('observingPools.volatility')}: {fmtPercent(component.risk_haircut.annualized_volatility)}

@@ -95,6 +95,7 @@ def test_rh1_flag_wires_and_invokes_fetch_closes_dry_run(monkeypatch):
     rc, rec = _run_refresh(
         monkeypatch, ["refresh", "--platform", _PLATFORM, "--dry-run", "--formula-version", FORMULA_4COMP_RH1], stub
     )
+    assert rc == 0
     assert rec["config"].formula_version == FORMULA_4COMP_RH1
     assert rec["dry_fetch_closes"] is not None
     assert stub.called
@@ -106,6 +107,7 @@ def test_rh1_flag_wires_fetch_closes_locked_path(monkeypatch):
     rc, rec = _run_refresh(
         monkeypatch, ["refresh", "--platform", _PLATFORM, "--formula-version", FORMULA_5COMP_RH1], stub
     )
+    assert rc == 0
     assert rec["config"].formula_version == FORMULA_5COMP_RH1
     assert rec["locked_fetch_closes"] is not None
     assert stub.called
