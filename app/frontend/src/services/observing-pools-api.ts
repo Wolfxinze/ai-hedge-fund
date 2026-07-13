@@ -23,9 +23,23 @@ export interface AgentBreakdown {
   degraded: boolean;
 }
 
+// B1 risk-haircut audit (src/quant/volatility.apply_risk_haircut). Present ONLY on the
+// risk_adjusted_momentum component and ONLY when the pool was scored under an rh1 formula version
+// (v3-4comp-rh1 / v3-5comp-rh1). Absent under the default momentum-only formula, so it is optional
+// everywhere and must never be assumed present. `degraded` ⇔ price data was missing/too short
+// (annualized_volatility null, haircut_points 0 — momentum passed through un-haircut).
+export interface RiskHaircut {
+  raw_momentum: number | null;
+  haircut_points: number;
+  annualized_volatility: number | null;
+  degraded: boolean;
+  policy: string;
+}
+
 export interface ComponentBreakdown {
   value: number | null;
   agents?: Record<string, AgentBreakdown>;
+  risk_haircut?: RiskHaircut;
 }
 
 export interface ScoreBreakdown {
@@ -127,6 +141,29 @@ export interface SerenityRecord {
   disclaimer_version: string;
 }
 
+// POST /serenity/discover request/response (app/backend/routes/observing_pools.py). The scorecard
+// is the caller's judgment — the 5 bottleneck dimensions (src/serenity/grading.SCORECARD_DIMENSIONS),
+// each 0-4; the backend rejects anything else with a 422 (never defaulted server-side).
+export interface SerenityDiscoverRequest {
+  ticker: string;
+  theme: string;
+  keywords: string[];
+  platform_key?: string | null;
+  chain_layer?: string | null;
+  hypothesis?: string | null;
+  sources?: string[];
+  max_per_source?: number;
+  scorecard: Record<string, number>;
+}
+
+export interface SerenityDiscoverResult {
+  ticker: string;
+  records: SerenityRecord[];
+  reference_count: number;
+  source_errors: Record<string, string>; // {source: exc_type} — degraded sources, surfaced not swallowed
+  failed_groups: number;
+}
+
 // ---- Monitors & reports ----------------------------------------------------
 
 export interface Monitor {
@@ -182,7 +219,16 @@ export interface MonitorRunResult {
 async function errorMessage(response: Response): Promise<string> {
   try {
     const body = await response.json();
-    if (body && typeof body.detail === 'string') return body.detail;
+    const detail = body?.detail;
+    if (typeof detail === 'string') return detail;
+    // FastAPI 422 (RequestValidationError) sends detail as an array of {loc, msg, type}. Render the
+    // first item as "<loc.join('.')>: <msg>" so the message names the offending field.
+    if (Array.isArray(detail) && detail.length > 0) {
+      const first = detail[0];
+      const msg = typeof first?.msg === 'string' ? first.msg : undefined;
+      const loc = Array.isArray(first?.loc) ? first.loc.join('.') : undefined;
+      if (msg) return loc ? `${loc}: ${msg}` : msg;
+    }
   } catch {
     // non-JSON body — fall through to the status text
   }
@@ -236,6 +282,12 @@ export const observingPoolsApi = {
 
   getSerenity: (ticker: string, limit = 50): Promise<SerenityRecord[]> =>
     getJson(`/serenity/research/${encodeURIComponent(ticker)}?limit=${limit}`),
+
+  // Trigger evidence discovery (EDGAR + Federal Register fan-out) and build research records —
+  // the API twin of `python -m src.serenity discover`. Research-only; can take several seconds
+  // (outbound fetches to allowlisted hosts happen server-side).
+  discoverSerenity: (request: SerenityDiscoverRequest): Promise<SerenityDiscoverResult> =>
+    sendJson('/serenity/discover', 'POST', request),
 
   listMonitors: (limit = 50): Promise<Monitor[]> => getJson(`/monitors?limit=${limit}`),
 

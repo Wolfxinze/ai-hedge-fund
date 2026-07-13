@@ -29,6 +29,8 @@ from src.observing_pools.pool_lock import (
     PoolLockDatabaseLockedError,
     refresh_pool_locked,
 )
+from src.serenity.grading import SCORECARD_DIMENSIONS
+from src.serenity.research import build_record
 from src.storage import session_scope
 from src.storage.models import (
     InnovationPlatform,
@@ -221,6 +223,113 @@ def get_serenity(ticker: str, db: Session = Depends(get_db), limit: int = Query(
         raise HTTPException(status_code=422, detail=f"invalid ticker '{ticker}'")
     records = db.query(SerenityResearchRecord).filter_by(ticker=ticker.upper()).order_by(SerenityResearchRecord.id.desc()).limit(limit).all()
     return [serialize_serenity(r) for r in records]  # disclaimer invariant enforced here (§9.9 every GET route)
+
+
+# The sources the discover flow may fan (mirrors gather._REGISTRY; "patents" is intentionally
+# absent there — number-driven, not ticker-driven). Validated here so a typo fails loud with a
+# 422 instead of gather's silent skip-with-warning.
+_DISCOVER_SOURCES = ("edgar", "federal_register")
+
+
+class DiscoverRequest(BaseModel):
+    """Body for POST /serenity/discover. Bounded + explicit: the scorecard is the caller's
+    human judgment (never defaulted server-side — a fabricated mid score would masquerade as
+    analysis), and sources are restricted to the allowlisted ticker-driven adapters."""
+
+    ticker: str
+    theme: str
+    keywords: list[str] = Field(..., max_length=20)
+    platform_key: str | None = None
+    chain_layer: str | None = None
+    hypothesis: str | None = None
+    sources: list[str] = Field(default_factory=lambda: list(_DISCOVER_SOURCES), max_length=len(_DISCOVER_SOURCES))
+    max_per_source: int = Field(3, ge=1, le=10)
+    scorecard: dict[str, int]
+
+
+def get_gatherer():
+    """The production multi-source evidence gatherer (EDGAR + Federal Register). Imported lazily
+    so this module stays import-offline; tests override this with a stub so no request ever
+    reaches the real adapters/network."""
+    from src.serenity.adapters.gather import gather_references
+
+    return gather_references
+
+
+@router.post("/serenity/discover")
+def discover_serenity(body: DiscoverRequest, db: Session = Depends(get_db), gatherer=Depends(get_gatherer)) -> dict:
+    """UI-triggered evidence discovery: fan the source adapters for a ticker, then build one
+    research record per non-empty source group (each with that source's fetch headers) — the API
+    twin of ``python -m src.serenity discover``. Research-only: produces SerenityResearchRecords
+    (disclaimer invariant via serialize_serenity), never a trade/order path. Outbound calls go
+    only to allowlisted hosts through the SSRF-guarded fetcher (build_record → fetch_excerpt)."""
+    ticker = body.ticker.strip().upper()
+    if not _TICKER_RE.match(ticker):
+        raise HTTPException(status_code=422, detail=f"invalid ticker '{body.ticker}'")
+    theme = body.theme.strip()
+    if not theme:
+        raise HTTPException(status_code=422, detail="theme must not be blank")
+    keywords = [k.strip() for k in body.keywords if k.strip()]
+    if not keywords:
+        raise HTTPException(status_code=422, detail="keywords must contain at least one non-blank entry")
+    if body.platform_key is not None and body.platform_key not in PLATFORM_KEYS:
+        raise HTTPException(status_code=404, detail=f"unknown platform '{body.platform_key}'")
+    unknown_sources = [s for s in body.sources if s not in _DISCOVER_SOURCES]
+    if unknown_sources:
+        raise HTTPException(status_code=422, detail=f"unknown source(s) {unknown_sources} (expected subset of {list(_DISCOVER_SOURCES)})")
+    # Order-preserving dedup: a repeated source name would otherwise re-invoke the builder and let
+    # gather's per-source counts[name] overwrite the first pass — plus it amplifies outbound requests.
+    sources = tuple(dict.fromkeys(body.sources))
+    if set(body.scorecard) != set(SCORECARD_DIMENSIONS) or any(not 0 <= v <= 4 for v in body.scorecard.values()):
+        raise HTTPException(status_code=422, detail=f"scorecard must map exactly {list(SCORECARD_DIMENSIONS)} to ints 0-4")
+
+    try:
+        result = gatherer(ticker, keywords=keywords, sources=sources, max_per_source=body.max_per_source)
+    except Exception:
+        # Fail loud in the log WITH the traceback, but never leak the raw exception to the client.
+        logger.exception("serenity discover: gather failed ticker=%s", ticker)
+        raise HTTPException(status_code=502, detail=f"evidence gathering failed for '{ticker}'")
+    if result.errors and all(s in result.errors for s in sources):
+        # EVERY requested source errored — an upstream FAILURE, not an empty result (CLI parity).
+        # (A source that legitimately returns zero refs while another errors falls through to a 200
+        # with records=[] + source_errors populated: "no evidence found + one degraded source".)
+        raise HTTPException(status_code=502, detail=f"all evidence sources errored for '{ticker}': {result.errors}")
+
+    # One record per source group, each committed independently so a later group failing neither
+    # rolls back earlier records nor reports a record that was never persisted (CLI parity).
+    records = []
+    failed_groups = 0
+    for fetch_headers, refs in result.groups:
+        if not refs:
+            continue
+        try:
+            record = build_record(
+                db,
+                theme=theme,
+                ticker=ticker,
+                platform_key=body.platform_key,
+                chain_layer=body.chain_layer,
+                bottleneck_hypothesis=body.hypothesis,
+                scorecard=body.scorecard,
+                references=refs,
+                fetch_missing=True,
+                fetch_headers=fetch_headers,
+            )
+            db.commit()  # get_db does not commit
+            records.append(record)
+        except Exception:
+            db.rollback()
+            failed_groups += 1
+            logger.exception("serenity discover: build_record failed for a source group ticker=%s", ticker)
+    if failed_groups and not records:
+        raise HTTPException(status_code=500, detail=f"discover failed to build any record for '{ticker}'")
+    return {
+        "ticker": ticker,
+        "records": [serialize_serenity(r) for r in records],  # disclaimer invariant on the write surface too
+        "reference_count": len(result.references),
+        "source_errors": result.errors,
+        "failed_groups": failed_groups,
+    }
 
 
 @router.get("/opportunity-reports")

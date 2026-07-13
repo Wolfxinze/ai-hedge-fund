@@ -1,10 +1,11 @@
 import { expect, test, type Page } from '@playwright/test';
 
-import { mockBackend, REFRESH_RESULT, STORED_DISCLAIMER } from './_backend-mock';
+import { DISCOVER_RESULT, mockBackend, REFRESH_RESULT, STORED_DISCLAIMER } from './_backend-mock';
 
-// Exact backend URL for the live-refresh POST — per-test overrides use it so Playwright's LIFO
+// Exact backend URLs for the POST endpoints — per-test overrides use them so Playwright's LIFO
 // route ordering fires them before the base mockBackend handler.
 const REFRESH_URL = 'http://localhost:8000/observing-pools/refresh';
+const DISCOVER_URL = 'http://localhost:8000/serenity/discover';
 
 // Order-placement verbs — a research-only UI must expose NONE of these as a control.
 const TRADE_ACTION = /\b(buy|sell|short|cover|trade|order|execute|place order)\b/i;
@@ -99,17 +100,188 @@ test.describe('Observing Pools — research-only invariants', () => {
     await expect(page.getByText(new RegExp(STORED_DISCLAIMER))).toBeVisible();
   });
 
+  // Serenity Discover flow (POST /serenity/discover): fills the form, asserts the request carries
+  // the user's inputs, and pins the success/partial/error/in-flight surfaces.
+  async function openSerenityDiscover(page: Page) {
+    await openObservingPools(page);
+    await page.getByRole('tab', { name: 'Serenity' }).click();
+    await page.getByLabel('Ticker').fill('AAPL');
+    await page.getByLabel('Theme').fill('AI infra');
+    await page.getByLabel('Keywords (comma-separated)').fill('HBM, supply');
+  }
+
+  test('serenity discover: happy path posts the form, reports the built records, and re-fetches research', async ({ page }) => {
+    let discoverBody: Record<string, unknown> | null = null;
+    page.on('request', (req) => {
+      if (req.method() === 'POST' && req.url() === DISCOVER_URL) discoverBody = req.postDataJSON();
+    });
+
+    await openSerenityDiscover(page);
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    // Success summary comes from the API response (1 record, 3 references).
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toBeVisible();
+    // The follow-up GET re-fetched research: the record card renders with the stored disclaimer.
+    await expect(page.getByText(/Grade: B/)).toBeVisible();
+    await expect(page.getByText(new RegExp(STORED_DISCLAIMER))).toBeVisible();
+    // The POST carried the user's inputs, keywords split on commas, and the full 5-dim scorecard.
+    expect(discoverBody).not.toBeNull();
+    expect(discoverBody!.ticker).toBe('AAPL');
+    expect(discoverBody!.theme).toBe('AI infra');
+    expect(discoverBody!.keywords).toEqual(['HBM', 'supply']);
+    expect(Object.keys(discoverBody!.scorecard as Record<string, number>).sort()).toEqual([
+      'capacity_expansion',
+      'certification_strictness',
+      'purity_precision',
+      'supplier_concentration',
+      'validation_cycle',
+    ]);
+  });
+
+  test('serenity discover: partial source failures are surfaced, not swallowed', async ({ page }) => {
+    await openSerenityDiscover(page);
+    await page.route(DISCOVER_URL, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...DISCOVER_RESULT, source_errors: { federal_register: 'Timeout' } }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toBeVisible();
+    await expect(page.getByText('Some sources failed: federal_register')).toBeVisible();
+  });
+
+  test('serenity discover: an upstream failure surfaces "Discovery failed." and stays retryable', async ({ page }) => {
+    await openSerenityDiscover(page);
+    await page.route(DISCOVER_URL, (route) =>
+      route.fulfill({
+        status: 502,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: "all evidence sources errored for 'AAPL'" }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    await expect(page.getByText(/Discovery failed\./)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Discover' })).toBeEnabled(); // retryable after failure
+  });
+
+  test('serenity discover: button is disabled while the discovery is in flight', async ({ page }) => {
+    await openSerenityDiscover(page);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(DISCOVER_URL, async (route) => {
+      await held;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(DISCOVER_RESULT),
+      });
+    });
+
+    const discover = page.getByRole('button', { name: 'Discover' });
+    await discover.click();
+    try {
+      await expect(discover).toBeDisabled(); // in-flight discovery disables the control
+      await expect(discover).toHaveText('Discovering…'); // label flips while in-flight
+    } finally {
+      release(); // guarantee unblock even if assertion fails — avoids 30s CI hang on regression
+    }
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toBeVisible();
+    await expect(discover).toBeEnabled(); // settled → re-enabled
+  });
+
+  test('serenity discover: button is disabled until ticker, theme, and keywords are all filled', async ({ page }) => {
+    await openObservingPools(page);
+    await page.getByRole('tab', { name: 'Serenity' }).click();
+    const discover = page.getByRole('button', { name: 'Discover' });
+    await expect(discover).toBeDisabled(); // nothing filled
+
+    await page.getByLabel('Ticker').fill('AAPL');
+    await expect(discover).toBeDisabled(); // theme + keywords still missing
+    await page.getByLabel('Theme').fill('AI infra');
+    await expect(discover).toBeDisabled(); // keywords still missing
+    await page.getByLabel('Keywords (comma-separated)').fill(' , ');
+    await expect(discover).toBeDisabled(); // only blank keywords
+    await page.getByLabel('Keywords (comma-separated)').fill('HBM');
+    await expect(discover).toBeEnabled();
+  });
+
+  test('serenity discover: rolled-back evidence groups are surfaced alongside the success summary', async ({ page }) => {
+    await openSerenityDiscover(page);
+    await page.route(DISCOVER_URL, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...DISCOVER_RESULT, failed_groups: 1 }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    // The success summary and the failed-groups warning coexist — neither overwrites the other.
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toBeVisible();
+    await expect(page.getByText('Failed to persist 1 evidence group(s); see server logs.')).toBeVisible();
+  });
+
+  test('serenity discover: a no-evidence result reports the no-evidence copy', async ({ page }) => {
+    await openSerenityDiscover(page);
+    await page.route(DISCOVER_URL, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...DISCOVER_RESULT, records: [], reference_count: 0 }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    await expect(page.getByText('No allowlisted evidence found for this ticker.')).toBeVisible();
+  });
+
+  test('serenity discover: clearing a scorecard dimension disables Discover; a valid 0-4 integer re-enables', async ({ page }) => {
+    await openSerenityDiscover(page); // ticker + theme + keywords filled → scorecard is the only gate
+    const discover = page.getByRole('button', { name: 'Discover' });
+    await expect(discover).toBeEnabled(); // scorecard prefilled with valid values
+
+    // Clearing a dimension is not a silent 0 — it is invalid and disables the control.
+    await page.getByLabel('Supplier concentration').fill('');
+    await expect(discover).toBeDisabled();
+
+    // Refilling a valid 0-4 integer re-enables it.
+    await page.getByLabel('Supplier concentration').fill('2');
+    await expect(discover).toBeEnabled();
+  });
+
   // Issue #76 — E2E coverage for the Pools Refresh button (shipped in PR #75). `name: 'Refresh'`
   // is a substring match, so the same locator resolves the button as its label flips to "Refreshing…".
-  test('pools refresh: happy path surfaces "Refresh complete."', async ({ page }) => {
+  test('pools refresh: happy path surfaces "Refresh complete." and re-fetches the pool', async ({ page }) => {
+    // Count GET /observing-pools/ai — loadPool's endpoint. A successful refresh calls loadPool
+    // AGAIN (pools-panel handleRefresh), so this must strictly increase; the count pins the
+    // re-fetch branch (asserting a rendered cell can't fail, since it renders on the first load too).
+    let poolGets = 0;
+    page.on('request', (req) => {
+      const u = new URL(req.url());
+      if (req.method() === 'GET' && u.host === 'localhost:8000' && u.pathname === '/observing-pools/ai') poolGets += 1;
+    });
+
     await openObservingPools(page);
     const refresh = page.getByRole('button', { name: 'Refresh' });
     await expect(refresh).toBeEnabled();
+    const getsBeforeRefresh = poolGets; // ≥1 from the initial load
 
     await refresh.click();
 
     // The role=status region is unique to the refresh feedback; asserts the success i18n string.
     await expect(page.getByRole('status')).toHaveText('Refresh complete.');
+    // The post-refresh loadPool re-fetch fired a fresh GET — strictly more than before the click.
+    await expect.poll(() => poolGets).toBeGreaterThan(getsBeforeRefresh);
   });
 
   test('pools refresh: a 409 surfaces "Refresh already in progress."', async ({ page }) => {
@@ -166,10 +338,73 @@ test.describe('Observing Pools — research-only invariants', () => {
     await refresh.click();
     try {
       await expect(refresh).toBeDisabled(); // in-flight refresh disables the control
+      await expect(refresh).toHaveText('Refreshing…'); // label flips while in-flight
     } finally {
       release(); // guarantee unblock even if assertion fails — avoids 30s CI hang on regression
     }
     await expect(page.getByRole('status')).toHaveText('Refresh complete.');
     await expect(refresh).toBeEnabled(); // settled → re-enabled
+  });
+
+  test('pools refresh: a generic error surfaces "Refresh failed."', async ({ page }) => {
+    await openObservingPools(page);
+    await page.route(REFRESH_URL, (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'internal server error' }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Refresh' }).click();
+
+    await expect(page.getByRole('status')).toHaveText('Refresh failed.');
+    await expect(page.getByRole('button', { name: 'Refresh' })).toBeEnabled(); // must be retryable
+  });
+
+  // rh1 risk-haircut audit (score_breakdown.components.risk_adjusted_momentum.risk_haircut). The
+  // robotics pool is scored under an rh1 formula and carries the audit; the "ai" default pool does
+  // not. RHF = clean haircut, RHT = degraded (missing price data), NOH = default formula (no audit).
+  test('pools breakdown: renders risk-haircut audit fields and a Degraded badge only for a degraded haircut', async ({ page }) => {
+    await openObservingPools(page);
+    await page.getByLabel('Platform').selectOption('robotics');
+    const rhfRow = page.getByRole('row', { name: /RHF/ });
+    await expect(rhfRow).toBeVisible();
+
+    // Expand the clean-haircut entry: pre-haircut momentum, haircut points, and volatility % render.
+    await rhfRow.getByRole('button', { name: 'Toggle score breakdown' }).click();
+    await expect(page.getByText(/Raw momentum: 70\.0/)).toBeVisible();
+    await expect(page.getByText(/Haircut: -12\.0/)).toBeVisible();
+    await expect(page.getByText('Volatility: 42.0%')).toBeVisible();
+    // degraded:false ⇒ NO Degraded badge (the robotics pool has no degraded agents, so the only
+    // possible "Degraded" badge on screen comes from a risk_haircut).
+    await expect(page.getByText('Degraded', { exact: true })).toHaveCount(0);
+
+    // Expand the degraded-haircut entry (price data too short): the Degraded badge now shows, and
+    // the null volatility renders as "—", never 0 or a fabricated percentage.
+    await page.getByRole('row', { name: /RHT/ }).getByRole('button', { name: 'Toggle score breakdown' }).click();
+    await expect(page.getByText('Degraded', { exact: true })).toHaveCount(1);
+    await expect(page.getByText('Volatility: —')).toBeVisible();
+    // A degraded haircut has haircut_points 0 → render an em dash, never a contradictory "-0.0".
+    await expect(page.getByText('Haircut: —')).toBeVisible();
+    await expect(page.getByText(/Haircut: -0/)).toHaveCount(0);
+  });
+
+  test('pools breakdown: no risk-haircut UI for an entry scored under the default (no-haircut) formula', async ({ page }) => {
+    await openObservingPools(page);
+    await page.getByLabel('Platform').selectOption('robotics');
+    const nohRow = page.getByRole('row', { name: /NOH/ });
+    await expect(nohRow).toBeVisible();
+
+    // Expand ONLY the no-haircut entry: none of the haircut labels or a placeholder dash render for
+    // a field that simply does not apply under the default momentum-only formula.
+    await nohRow.getByRole('button', { name: 'Toggle score breakdown' }).click();
+    // The breakdown IS shown (positive control: the risk_adjusted_momentum component value renders)…
+    await expect(page.getByText('risk adjusted momentum', { exact: false })).toBeVisible();
+    // …but with no haircut audit fields at all.
+    await expect(page.getByText(/Raw momentum/)).toHaveCount(0);
+    await expect(page.getByText(/Haircut:/)).toHaveCount(0);
+    await expect(page.getByText(/Volatility/)).toHaveCount(0);
+    await expect(page.getByText('Degraded', { exact: true })).toHaveCount(0);
   });
 });

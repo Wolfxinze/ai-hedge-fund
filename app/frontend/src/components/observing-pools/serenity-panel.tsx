@@ -1,14 +1,54 @@
-import { Search } from 'lucide-react';
+import { Search, Sparkles } from 'lucide-react';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import type { TranslationKey } from '@/i18n/translations';
 import { useI18n } from '@/i18n/use-i18n';
 import { observingPoolsApi, SerenityRecord } from '@/services/observing-pools-api';
 
 import { DisclaimerBanner } from './disclaimer-banner';
 import { actionVariant, EM_DASH, fmt, gradeVariant } from './lib';
+
+// Mirrors src/serenity/grading.SCORECARD_DIMENSIONS — order and keys must match, the backend
+// 422s on any drift. Each dimension is scored 0-4 by the user (their judgment, never defaulted
+// server-side).
+const SCORECARD_DIMENSIONS = [
+  'supplier_concentration',
+  'validation_cycle',
+  'capacity_expansion',
+  'certification_strictness',
+  'purity_precision',
+] as const;
+type ScorecardDim = (typeof SCORECARD_DIMENSIONS)[number];
+
+const DIM_LABEL_KEYS: Record<ScorecardDim, TranslationKey> = {
+  supplier_concentration: 'observingPools.dimSupplierConcentration',
+  validation_cycle: 'observingPools.dimValidationCycle',
+  capacity_expansion: 'observingPools.dimCapacityExpansion',
+  certification_strictness: 'observingPools.dimCertificationStrictness',
+  purity_precision: 'observingPools.dimPurityPrecision',
+};
+
+// Scorecard values are held as raw strings so an empty field stays empty (never a silent 0) — the
+// backend refuses to default this extreme judgment. Each dim must parse to an integer 0-4 to be valid.
+const NEUTRAL_SCORECARD: Record<ScorecardDim, string> = {
+  supplier_concentration: '2',
+  validation_cycle: '2',
+  capacity_expansion: '2',
+  certification_strictness: '2',
+  purity_precision: '2',
+};
+
+// Returns the parsed integer 0-4 for a raw scorecard input, or null when empty / non-integer /
+// out of range (decimals and NaN are invalid — the backend 422s on anything but an int 0-4).
+function parseDim(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const value = Number(trimmed);
+  return value >= 0 && value <= 4 ? value : null;
+}
 
 export function SerenityPanel() {
   const { t } = useI18n();
@@ -17,6 +57,12 @@ export function SerenityPanel() {
   const [searched, setSearched] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [theme, setTheme] = useState('');
+  const [keywords, setKeywords] = useState('');
+  const [scorecard, setScorecard] = useState<Record<ScorecardDim, string>>(NEUTRAL_SCORECARD);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
   // Guards setState after unmount: the search is user-triggered (not an effect), so a fetch can be
   // in flight when the panel/tab is closed. Re-set to true in the effect body so a React StrictMode
   // remount (which runs cleanup once) restores it — otherwise results would never render.
@@ -49,6 +95,69 @@ export function SerenityPanel() {
       });
   };
 
+  const parsedKeywords = keywords.split(',').map((k) => k.trim()).filter(Boolean);
+  const scorecardValid = SCORECARD_DIMENSIONS.every((dim) => parseDim(scorecard[dim]) !== null);
+  const canDiscover =
+    Boolean(ticker.trim()) && Boolean(theme.trim()) && parsedKeywords.length > 0 && scorecardValid;
+
+  const discover = (event: FormEvent) => {
+    event.preventDefault();
+    if (!canDiscover || discovering) return;
+    const trimmedTicker = ticker.trim();
+    setDiscovering(true);
+    setDiscoverMessage(null);
+    setDiscoverError(null);
+    const parsedScorecard = Object.fromEntries(
+      SCORECARD_DIMENSIONS.map((dim) => [dim, parseDim(scorecard[dim]) as number]),
+    ) as Record<ScorecardDim, number>;
+    observingPoolsApi
+      .discoverSerenity({ ticker: trimmedTicker, theme: theme.trim(), keywords: parsedKeywords, scorecard: parsedScorecard })
+      .then((result) => {
+        if (!mounted.current) return;
+        setDiscoverMessage(
+          result.records.length === 0 && result.reference_count === 0
+            ? t('observingPools.discoverNoEvidence')
+            : t('observingPools.discoverBuilt', { count: String(result.records.length), refs: String(result.reference_count) }),
+        );
+        // Surface degraded sources AND rolled-back evidence groups together — neither may overwrite
+        // the other, so both warnings render in the discover error area.
+        const warnings: string[] = [];
+        const failedSources = Object.keys(result.source_errors);
+        if (failedSources.length > 0) {
+          warnings.push(t('observingPools.discoverPartial', { sources: failedSources.join(', ') }));
+        }
+        if (result.failed_groups > 0) {
+          warnings.push(t('observingPools.discoverGroupsFailed', { count: String(result.failed_groups) }));
+        }
+        if (warnings.length > 0) setDiscoverError(warnings.join(' '));
+        // Refresh the records list so the new research is immediately visible. This is a distinct
+        // fetch: its failure means the LIST failed to load (search error), NOT that discovery failed,
+        // so it gets its own catch and leaves the discover message/warning intact.
+        return observingPoolsApi
+          .getSerenity(trimmedTicker)
+          .then((refreshed) => {
+            if (!mounted.current) return;
+            setRecords(refreshed);
+            setSearched(true);
+          })
+          .catch((err: unknown) => {
+            if (mounted.current) setError(err instanceof Error ? err.message : String(err));
+          });
+      })
+      .catch((err: unknown) => {
+        if (mounted.current) {
+          setDiscoverError(`${t('observingPools.discoverFailed')} ${err instanceof Error ? err.message : String(err)}`);
+        }
+      })
+      .finally(() => {
+        if (mounted.current) setDiscovering(false);
+      });
+  };
+
+  const setDim = (dim: ScorecardDim, raw: string) => {
+    setScorecard((prev) => ({ ...prev, [dim]: raw }));
+  };
+
   return (
     <div className="space-y-4">
       <form onSubmit={search} className="flex flex-wrap items-end gap-2">
@@ -59,7 +168,13 @@ export function SerenityPanel() {
           <Input
             id="serenity-ticker"
             value={ticker}
-            onChange={(event) => setTicker(event.target.value)}
+            onChange={(event) => {
+              setTicker(event.target.value);
+              // Discover messages are about the previous ticker — clear them so stale success/warning
+              // text doesn't read as being about the newly typed ticker.
+              setDiscoverMessage(null);
+              setDiscoverError(null);
+            }}
             placeholder={t('observingPools.serenityPlaceholder')}
             className="w-48"
           />
@@ -75,6 +190,66 @@ export function SerenityPanel() {
       {searched && !loading && !error && records.length === 0 && (
         <div className="text-sm text-muted-foreground">{t('observingPools.noSerenity')}</div>
       )}
+
+      <form onSubmit={discover} className="space-y-3 rounded-lg border bg-card p-3 text-card-foreground shadow-sm">
+        <div>
+          <h3 className="text-sm font-semibold">{t('observingPools.discoverTitle')}</h3>
+          <p className="text-xs text-muted-foreground">{t('observingPools.discoverHint')}</p>
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="flex flex-col gap-1">
+            <label htmlFor="discover-theme" className="text-sm font-medium">
+              {t('observingPools.theme')}
+            </label>
+            <Input
+              id="discover-theme"
+              value={theme}
+              onChange={(event) => setTheme(event.target.value)}
+              placeholder={t('observingPools.themePlaceholder')}
+              className="w-64"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <label htmlFor="discover-keywords" className="text-sm font-medium">
+              {t('observingPools.keywords')}
+            </label>
+            <Input
+              id="discover-keywords"
+              value={keywords}
+              onChange={(event) => setKeywords(event.target.value)}
+              placeholder={t('observingPools.keywordsPlaceholder')}
+              className="w-64"
+            />
+          </div>
+        </div>
+        <fieldset className="space-y-1">
+          <legend className="text-sm font-medium">{t('observingPools.scorecard')}</legend>
+          <div className="flex flex-wrap gap-3">
+            {SCORECARD_DIMENSIONS.map((dim) => (
+              <div key={dim} className="flex flex-col gap-1">
+                <label htmlFor={`discover-dim-${dim}`} className="text-xs text-muted-foreground">
+                  {t(DIM_LABEL_KEYS[dim])}
+                </label>
+                <Input
+                  id={`discover-dim-${dim}`}
+                  type="number"
+                  min={0}
+                  max={4}
+                  value={scorecard[dim]}
+                  onChange={(event) => setDim(dim, event.target.value)}
+                  className="w-20"
+                />
+              </div>
+            ))}
+          </div>
+        </fieldset>
+        <Button type="submit" disabled={discovering || !canDiscover} className="gap-1">
+          <Sparkles className="size-4" aria-hidden="true" />
+          {discovering ? t('observingPools.discovering') : t('observingPools.discover')}
+        </Button>
+        {discoverMessage && <div className="text-sm text-muted-foreground">{discoverMessage}</div>}
+        {discoverError && <div className="text-sm text-destructive">{discoverError}</div>}
+      </form>
 
       <div className="space-y-3">
         {records.map((record) => (

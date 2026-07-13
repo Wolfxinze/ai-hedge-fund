@@ -24,3 +24,21 @@ VRT,Vertiv Holdings,NYSE,Industrials,Electrical Equipment,ai;energy_storage
 CRM,Salesforce Inc,NYSE,Technology,Software - Application,ai
 IBM,International Business Machines,NYSE,Technology,Information Technology Services,ai
 ORCL,Oracle Corporation,NYSE,Technology,Software - Infrastructure,ai
+COIN,Coinbase Global Inc,NASDAQ,Financial Services,Capital Markets,blockchain
+MSTR,Strategy Inc,NASDAQ,Financial Services,Capital Markets,blockchain
+MARA,MARA Holdings Inc,NASDAQ,Financial Services,Capital Markets,blockchain
+RIOT,Riot Platforms Inc,NASDAQ,Financial Services,Capital Markets,blockchain
+HUT,Hut 8 Corp,NASDAQ,Financial Services,Capital Markets,blockchain
+CLSK,CleanSpark Inc,NASDAQ,Financial Services,Capital Markets,blockchain
+ILMN,Illumina Inc,NASDAQ,Healthcare,Diagnostics & Research,multiomic_sequencing
+CRSP,CRISPR Therapeutics AG,NASDAQ,Healthcare,Biotechnology,multiomic_sequencing
+TXG,10x Genomics Inc,NASDAQ,Healthcare,Diagnostics & Research,multiomic_sequencing
+GH,Guardant Health Inc,NASDAQ,Healthcare,Diagnostics & Research,multiomic_sequencing
+NTRA,Natera Inc,NASDAQ,Healthcare,Diagnostics & Research,multiomic_sequencing
+PACB,Pacific Biosciences of California Inc,NASDAQ,Healthcare,Biotechnology,multiomic_sequencing
+DNA,Ginkgo Bioworks Holdings Inc,NYSE,Healthcare,Biotechnology,multiomic_sequencing
+ISRG,Intuitive Surgical Inc,NASDAQ,Healthcare,Medical Devices,robotics
+ROK,Rockwell Automation Inc,NYSE,Industrials,Specialty Industrial Machinery,robotics
+ALB,Albemarle Corporation,NYSE,Basic Materials,Specialty Chemicals,energy_storage
+QS,QuantumScape Corporation,NYSE,Industrials,Electrical Equipment & Parts,energy_storage
+ENVX,Enovix Corporation,NASDAQ,Technology,Electronic Components,energy_storage

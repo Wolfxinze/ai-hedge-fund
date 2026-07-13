@@ -27,6 +27,12 @@ import { entryIsDegraded, EM_DASH, fmt, runStatusVariant } from './lib';
 // label set if /innovation-platforms is empty/unseeded. The selected key is still validated server-side.
 const FALLBACK_PLATFORMS = ['ai', 'robotics', 'energy_storage', 'blockchain', 'multiomic_sequencing'];
 
+// Annualized volatility is a fraction (0.42 → "42.0%"); "—" when unavailable (a degraded haircut
+// carries a null volatility). Mirrors lib.fmt's non-number → em-dash guard for untrusted JSON.
+function fmtPercent(value: number | null): string {
+  return typeof value === 'number' && !Number.isNaN(value) ? `${(value * 100).toFixed(1)}%` : EM_DASH;
+}
+
 function PerAgentDetail({ entry }: { entry: PoolEntry }) {
   const { t } = useI18n();
   const breakdown = entry.score_breakdown;
@@ -54,6 +60,29 @@ function PerAgentDetail({ entry }: { entry: PoolEntry }) {
                 </span>
               )}
             </div>
+            {component.risk_haircut && (
+              // rh1 formula only — absent under the default momentum-only formula, so nothing
+              // (no labels, no dash placeholders) renders for the common case.
+              <div className="ml-3 mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted-foreground">
+                <span>
+                  {t('observingPools.rawMomentum')}: {fmt(component.risk_haircut.raw_momentum, 1)}
+                </span>
+                <span>
+                  {/* A degraded haircut has haircut_points 0 (momentum passed through un-haircut);
+                      rendering "-0.0" next to the Degraded badge reads as contradictory, so show a dash. */}
+                  {t('observingPools.haircut')}:{' '}
+                  {component.risk_haircut.degraded ? EM_DASH : `-${fmt(component.risk_haircut.haircut_points, 1)}`}
+                </span>
+                <span>
+                  {t('observingPools.volatility')}: {fmtPercent(component.risk_haircut.annualized_volatility)}
+                </span>
+                {component.risk_haircut.degraded && (
+                  <Badge variant="warning" className="px-1 py-0 text-[9px]">
+                    {t('observingPools.degraded')}
+                  </Badge>
+                )}
+              </div>
+            )}
             {agentNames.length > 0 && (
               <div className="ml-3 mt-1 flex flex-wrap gap-1">
                 {agentNames.map((agentName) => {
