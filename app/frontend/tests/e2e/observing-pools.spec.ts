@@ -6,6 +6,9 @@ import { DISCOVER_RESULT, mockBackend, REFRESH_RESULT, STORED_DISCLAIMER } from 
 // route ordering fires them before the base mockBackend handler.
 const REFRESH_URL = 'http://localhost:8000/observing-pools/refresh';
 const DISCOVER_URL = 'http://localhost:8000/serenity/discover';
+// GET /serenity/research/<ticker>?limit=50 — the discover follow-up re-fetch. Glob so a per-test
+// override matches any ticker + query string; LIFO fires it before mockBackend's catch-all.
+const RESEARCH_URL_GLOB = 'http://localhost:8000/serenity/research/**';
 
 // Order-placement verbs — a research-only UI must expose NONE of these as a control.
 const TRADE_ACTION = /\b(buy|sell|short|cover|trade|order|execute|place order)\b/i;
@@ -257,6 +260,63 @@ test.describe('Observing Pools — research-only invariants', () => {
     // Refilling a valid 0-4 integer re-enables it.
     await page.getByLabel('Supplier concentration').fill('2');
     await expect(discover).toBeEnabled();
+  });
+
+  test('serenity discover: a 422 validation error renders the offending field from the detail array', async ({ page }) => {
+    await openSerenityDiscover(page);
+    // FastAPI RequestValidationError shape: detail is an array of {loc, msg, type}. Pins the
+    // errorMessage() array branch that renders the first item as "<loc.join('.')>: <msg>".
+    await page.route(DISCOVER_URL, (route) =>
+      route.fulfill({
+        status: 422,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          detail: [
+            { loc: ['body', 'sources'], msg: 'List should have at least 1 item after validation, not 0', type: 'too_short' },
+          ],
+        }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    // The discover error area prefixes "Discovery failed." then the rendered array detail.
+    await expect(page.getByText(/Discovery failed\./)).toBeVisible();
+    await expect(page.getByText(/body\.sources: List should have at least 1 item/)).toBeVisible();
+  });
+
+  test('serenity discover: a re-fetch failure is a search error, not a discovery failure', async ({ page }) => {
+    await openSerenityDiscover(page);
+    // POST /serenity/discover stays on the default success mock; only the follow-up GET fails. Its
+    // failure must surface as the generic search error, leaving the discover success intact and
+    // NEVER mislabelling it as "Discovery failed.".
+    await page.route(RESEARCH_URL_GLOB, (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'boom' }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    // Discovery itself succeeded — its summary stays visible.
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toBeVisible();
+    // The list re-fetch failure surfaces as the generic search error (observingPools.error + message).
+    await expect(page.getByText(/boom|Error/)).toBeVisible();
+    // Critically: the re-fetch failure is NOT rendered as a discovery failure.
+    await expect(page.getByText(/Discovery failed\./)).toHaveCount(0);
+  });
+
+  test('serenity discover: editing the ticker clears the stale discover success message', async ({ page }) => {
+    await openSerenityDiscover(page);
+    await page.getByRole('button', { name: 'Discover' }).click();
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toBeVisible();
+
+    // Typing a new ticker means the prior success is about a different ticker — it must clear so it
+    // doesn't read as being about the newly typed one.
+    await page.getByLabel('Ticker').fill('MSFT');
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toHaveCount(0);
   });
 
   // Issue #76 — E2E coverage for the Pools Refresh button (shipped in PR #75). `name: 'Refresh'`

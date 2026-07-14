@@ -259,6 +259,16 @@ def test_discover_unknown_source_is_422(env):
     assert "carrier_pigeon" in r.json()["detail"]
 
 
+def test_discover_explicit_empty_sources_is_422(env):
+    # An explicit `sources: []` must fail loud (422), not vacuously skip the unknown-source check
+    # + the all-sources-errored 502 gate and return a "no evidence found" 200 (issue #79 item 1).
+    r = env.client.post("/serenity/discover", json=_body(sources=[]))
+    assert r.status_code == 422
+    assert env.calls == []  # never reached the gatherer
+    with contextlib.closing(env.Session()) as s:
+        assert s.query(SerenityResearchRecord).count() == 0
+
+
 @pytest.mark.parametrize("keywords", [[], ["   "], ""])
 def test_discover_empty_keywords_is_422(env, keywords):
     assert env.client.post("/serenity/discover", json=_body(keywords=keywords)).status_code == 422
