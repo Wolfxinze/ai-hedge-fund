@@ -242,7 +242,7 @@ class DiscoverRequest(BaseModel):
     platform_key: str | None = None
     chain_layer: str | None = None
     hypothesis: str | None = None
-    sources: list[str] = Field(default_factory=lambda: list(_DISCOVER_SOURCES), max_length=len(_DISCOVER_SOURCES))
+    sources: list[str] = Field(default_factory=lambda: list(_DISCOVER_SOURCES), min_length=1, max_length=len(_DISCOVER_SOURCES))
     max_per_source: int = Field(3, ge=1, le=10)
     scorecard: dict[str, int]
 
