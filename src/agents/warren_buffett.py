@@ -541,7 +541,11 @@ def calculate_intrinsic_value(financial_line_items: list) -> dict[str, any]:
         years = len(historical_earnings) - 1
 
         if oldest_earnings > 0:
-            historical_growth = ((latest_earnings / oldest_earnings) ** (1 / years)) - 1
+            if latest_earnings > 0:
+                historical_growth = ((latest_earnings / oldest_earnings) ** (1 / years)) - 1
+            else:
+                # Profit->loss decline: a negative ratio ** fractional power is complex; floor it.
+                historical_growth = -0.05
             # Conservative adjustment - cap growth and apply haircut
             historical_growth = max(-0.05, min(historical_growth, 0.15))  # Cap between -5% and 15%
             conservative_growth = historical_growth * 0.7  # Apply 30% haircut for conservatism
