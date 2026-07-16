@@ -1,4 +1,4 @@
-import { Search, Sparkles } from 'lucide-react';
+import { Radar, Search, Sparkles } from 'lucide-react';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 
 import { Badge } from '@/components/ui/badge';
@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { TranslationKey } from '@/i18n/translations';
 import { useI18n } from '@/i18n/use-i18n';
-import { observingPoolsApi, SerenityRecord } from '@/services/observing-pools-api';
+import { observingPoolsApi, SerenityRecord, SerenitySeekCandidate } from '@/services/observing-pools-api';
 
 import { DisclaimerBanner } from './disclaimer-banner';
 import { actionVariant, EM_DASH, fmt, gradeVariant } from './lib';
@@ -63,6 +63,11 @@ export function SerenityPanel() {
   const [discovering, setDiscovering] = useState(false);
   const [discoverMessage, setDiscoverMessage] = useState<string | null>(null);
   const [discoverError, setDiscoverError] = useState<string | null>(null);
+  // Unknown-ticker seek flow: keywords → ranked filer candidates → click one to pre-fill the ticker.
+  const [seeking, setSeeking] = useState(false);
+  const [seekCandidates, setSeekCandidates] = useState<SerenitySeekCandidate[]>([]);
+  const [seekSearched, setSeekSearched] = useState(false);
+  const [seekError, setSeekError] = useState<string | null>(null);
   // Guards setState after unmount: the search is user-triggered (not an effect), so a fetch can be
   // in flight when the panel/tab is closed. Re-set to true in the effect body so a React StrictMode
   // remount (which runs cleanup once) restores it — otherwise results would never render.
@@ -99,6 +104,35 @@ export function SerenityPanel() {
   const scorecardValid = SCORECARD_DIMENSIONS.every((dim) => parseDim(scorecard[dim]) !== null);
   const canDiscover =
     Boolean(ticker.trim()) && Boolean(theme.trim()) && parsedKeywords.length > 0 && scorecardValid;
+  // Seek needs only keywords — a ticker is precisely what this flow finds, so it is NOT required.
+  const canSeek = parsedKeywords.length > 0;
+
+  // Fill the ticker input from a chosen candidate's first symbol; treated like typing a new ticker,
+  // so stale discover success/warning text (about a prior ticker) is cleared.
+  const fillTickerFromCandidate = (symbol: string) => {
+    setTicker(symbol);
+    setDiscoverMessage(null);
+    setDiscoverError(null);
+  };
+
+  const seek = () => {
+    if (!canSeek || seeking) return;
+    setSeeking(true);
+    setSeekError(null);
+    observingPoolsApi
+      .seekSerenity({ keywords: parsedKeywords })
+      .then((result) => {
+        if (!mounted.current) return;
+        setSeekCandidates(result.candidates);
+        setSeekSearched(true);
+      })
+      .catch((err: unknown) => {
+        if (mounted.current) setSeekError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (mounted.current) setSeeking(false);
+      });
+  };
 
   const discover = (event: FormEvent) => {
     event.preventDefault();
@@ -222,6 +256,66 @@ export function SerenityPanel() {
             />
           </div>
         </div>
+
+        <div className="space-y-2">
+          <Button type="button" variant="outline" onClick={seek} disabled={seeking || !canSeek} className="gap-1">
+            <Radar className="size-4" aria-hidden="true" />
+            {seeking ? t('observingPools.seeking') : t('observingPools.seek')}
+          </Button>
+          {seekError && (
+            <div className="text-sm text-destructive">
+              {t('observingPools.seekFailed')} {seekError}
+            </div>
+          )}
+          {seekSearched && !seeking && !seekError && seekCandidates.length === 0 && (
+            <div className="text-sm text-muted-foreground">{t('observingPools.seekEmpty')}</div>
+          )}
+          {seekCandidates.length > 0 && (
+            <ul className="space-y-2">
+              {seekCandidates.map((candidate) => {
+                const firstTicker = candidate.tickers[0];
+                const disabled = !firstTicker;
+                return (
+                  <li key={candidate.cik}>
+                    <button
+                      type="button"
+                      disabled={disabled}
+                      onClick={() => fillTickerFromCandidate(firstTicker)}
+                      className={
+                        'w-full rounded-lg border bg-card p-3 text-left text-card-foreground shadow-sm transition-colors ' +
+                        (disabled
+                          ? 'cursor-not-allowed opacity-60'
+                          : 'cursor-pointer hover:border-primary hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none')
+                      }
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">{candidate.company}</span>
+                        {candidate.tickers.length > 0 ? (
+                          candidate.tickers.map((symbol) => (
+                            <Badge key={symbol} variant="secondary">
+                              {symbol}
+                            </Badge>
+                          ))
+                        ) : (
+                          <span className="text-xs italic text-muted-foreground">
+                            {t('observingPools.seekNoTicker')}
+                          </span>
+                        )}
+                        <span className="text-xs text-muted-foreground">
+                          {t('observingPools.seekHits', { count: String(candidate.hits) })}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {t('observingPools.seekFiled', { date: candidate.latest_filing_date ?? EM_DASH })}
+                        </span>
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
         <fieldset className="space-y-1">
           <legend className="text-sm font-medium">{t('observingPools.scorecard')}</legend>
           <div className="flex flex-wrap gap-3">

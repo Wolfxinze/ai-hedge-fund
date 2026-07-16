@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import date
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -329,6 +330,49 @@ def discover_serenity(body: DiscoverRequest, db: Session = Depends(get_db), gath
         "reference_count": len(result.references),
         "source_errors": result.errors,
         "failed_groups": failed_groups,
+    }
+
+
+class SeekRequest(BaseModel):
+    """Body for POST /serenity/seek — the UNKNOWN-ticker flow. No ``ticker`` field by design:
+    the caller supplies bottleneck keywords and gets back candidate companies. Bounded exactly
+    like the adapter it feeds (keywords 1-80 chars each; ``max_candidates`` is the SEC-politeness
+    ceiling of 25). An explicit ``keywords: []`` fails loud with a 422 (mirrors discover's
+    ``sources`` lesson) rather than a vacuous empty-result 200."""
+
+    keywords: list[Annotated[str, Field(min_length=1, max_length=80)]] = Field(..., min_length=1)
+    max_candidates: int = Field(10, ge=1, le=25)
+
+
+def get_seeker():
+    """The production EDGAR full-text-search seek adapter. Imported lazily so this module stays
+    import-offline; tests override this with a stub so no request ever reaches efts.sec.gov."""
+    from src.serenity.adapters.edgar_fts import seek_candidates
+
+    return seek_candidates
+
+
+@router.post("/serenity/seek")
+def seek_serenity(body: SeekRequest, seeker=Depends(get_seeker)) -> dict:
+    """UI-triggered UNKNOWN-ticker discovery: given bottleneck keywords, return the candidate
+    companies (CIK + tickers) whose recent SEC filings match — the inverse of the ticker-keyed
+    discover flow. Read-only: no database write, no session touch. The adapter is TOTAL — it
+    never raises on network/HTTP/parse failure, degrading each per-keyword problem into
+    ``errors`` — so zero candidates is still a 200 with those errors surfaced (the frontend
+    renders the empty state; adapter degradation is never turned into a 5xx)."""
+    result = seeker(body.keywords, max_candidates=body.max_candidates)
+    return {
+        "candidates": [
+            {
+                "cik": c.cik,
+                "company": c.company,
+                "tickers": list(c.tickers),
+                "hits": c.hits,
+                "latest_filing_date": c.latest_filing_date,
+            }
+            for c in result.candidates
+        ],
+        "errors": list(result.errors),
     }
 
 
