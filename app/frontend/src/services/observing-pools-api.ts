@@ -164,6 +164,29 @@ export interface SerenityDiscoverResult {
   failed_groups: number;
 }
 
+// POST /serenity/seek request/response (app/backend/routes/observing_pools.py). The unknown-ticker
+// flow: given only keywords, fan out an EDGAR full-text search and rank the filer companies that
+// hit. A candidate with an empty `tickers` list has no resolvable symbol (foreign/private filer) —
+// the UI renders it non-clickable rather than fabricating a ticker. THIS SHAPE IS A CROSS-TASK
+// CONTRACT shared with the backend route; do not deviate from the field names.
+export interface SerenitySeekRequest {
+  keywords: string[];
+  max_candidates?: number;
+}
+
+export interface SerenitySeekCandidate {
+  cik: string;
+  company: string;
+  tickers: string[];
+  hits: number;
+  latest_filing_date: string | null;
+}
+
+export interface SerenitySeekResponse {
+  candidates: SerenitySeekCandidate[];
+  errors: string[];
+}
+
 // ---- Monitors & reports ----------------------------------------------------
 
 export interface Monitor {
@@ -288,6 +311,11 @@ export const observingPoolsApi = {
   // (outbound fetches to allowlisted hosts happen server-side).
   discoverSerenity: (request: SerenityDiscoverRequest): Promise<SerenityDiscoverResult> =>
     sendJson('/serenity/discover', 'POST', request),
+
+  // Unknown-ticker discovery: rank filer companies by an EDGAR full-text search over the keywords,
+  // so the user can pick a candidate and pre-fill the ticker before running full discovery.
+  seekSerenity: (request: SerenitySeekRequest): Promise<SerenitySeekResponse> =>
+    sendJson('/serenity/seek', 'POST', request),
 
   listMonitors: (limit = 50): Promise<Monitor[]> => getJson(`/monitors?limit=${limit}`),
 

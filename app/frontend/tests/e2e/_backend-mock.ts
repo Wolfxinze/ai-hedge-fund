@@ -138,6 +138,30 @@ export const DISCOVER_RESULT = {
   failed_groups: 0,
 };
 
+// POST /serenity/seek success body (services/observing-pools-api.SerenitySeekResponse) — the
+// unknown-ticker flow. TSM has resolvable tickers (clickable → fills the ticker input); the second
+// candidate has an empty `tickers` list (foreign filer → rendered non-clickable). Exported so
+// per-test overrides (held promise) can reuse the contract shape.
+export const SEEK_RESULT = {
+  candidates: [
+    {
+      cik: '0001046179',
+      company: 'Taiwan Semiconductor Manufacturing Co Ltd',
+      tickers: ['TSM', 'TSMWF'],
+      hits: 12,
+      latest_filing_date: '2026-05-14',
+    },
+    {
+      cik: '0000912093',
+      company: 'ASML Holding Foundry Partners',
+      tickers: [],
+      hits: 4,
+      latest_filing_date: null,
+    },
+  ],
+  errors: [],
+};
+
 const API_KEYS_LIST = [
   { id: 1, provider: 'OPENAI_API_KEY', is_set: true, masked_tail: 'ab12', is_active: true, created_at: '2026-06-21' },
 ];
@@ -161,6 +185,7 @@ export async function mockBackend(page: Page): Promise<void> {
     if (pathname === '/opportunity-reports') return json(REPORTS);
     if (pathname === '/monitors') return json(MONITORS);
     if (route.request().method() === 'POST' && pathname === '/serenity/discover') return json(DISCOVER_RESULT);
+    if (route.request().method() === 'POST' && pathname === '/serenity/seek') return json(SEEK_RESULT);
     if (pathname.startsWith('/serenity/research/')) return json(SERENITY_AAPL);
     if (pathname === '/api-keys') return json(API_KEYS_LIST);
     return json([]);

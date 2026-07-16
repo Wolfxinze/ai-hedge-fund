@@ -1,11 +1,12 @@
 import { expect, test, type Page } from '@playwright/test';
 
-import { DISCOVER_RESULT, mockBackend, REFRESH_RESULT, STORED_DISCLAIMER } from './_backend-mock';
+import { DISCOVER_RESULT, mockBackend, REFRESH_RESULT, SEEK_RESULT, STORED_DISCLAIMER } from './_backend-mock';
 
 // Exact backend URLs for the POST endpoints — per-test overrides use them so Playwright's LIFO
 // route ordering fires them before the base mockBackend handler.
 const REFRESH_URL = 'http://localhost:8000/observing-pools/refresh';
 const DISCOVER_URL = 'http://localhost:8000/serenity/discover';
+const SEEK_URL = 'http://localhost:8000/serenity/seek';
 // GET /serenity/research/<ticker>?limit=50 — the discover follow-up re-fetch. Glob so a per-test
 // override matches any ticker + query string; LIFO fires it before mockBackend's catch-all.
 const RESEARCH_URL_GLOB = 'http://localhost:8000/serenity/research/**';
@@ -317,6 +318,100 @@ test.describe('Observing Pools — research-only invariants', () => {
     // doesn't read as being about the newly typed one.
     await page.getByLabel('Ticker').fill('MSFT');
     await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toHaveCount(0);
+  });
+
+  // Serenity Seek flow (POST /serenity/seek): the UNKNOWN-ticker path. Keywords alone (no ticker)
+  // enable the seek; the ranked candidate list pre-fills the ticker on click.
+  async function openSerenitySeek(page: Page) {
+    await openObservingPools(page);
+    await page.getByRole('tab', { name: 'Serenity' }).click();
+    await page.getByLabel('Keywords (comma-separated)').fill('HBM, packaging');
+  }
+
+  test('serenity seek: keywords-only search lists candidates and clicking one fills the ticker', async ({ page }) => {
+    let seekBody: Record<string, unknown> | null = null;
+    page.on('request', (req) => {
+      if (req.method() === 'POST' && req.url() === SEEK_URL) seekBody = req.postDataJSON();
+    });
+
+    await openSerenitySeek(page);
+    // The ticker is empty and seek is enabled anyway — a ticker is NOT required for this flow.
+    await expect(page.getByLabel('Ticker')).toHaveValue('');
+    const seek = page.getByRole('button', { name: 'Seek Candidates' });
+    await expect(seek).toBeEnabled();
+
+    await seek.click();
+
+    // The ranked candidate list renders; the TSM filer is clickable, the ticker-less filer is not.
+    const tsm = page.getByRole('button', { name: /Taiwan Semiconductor/ });
+    await expect(tsm).toBeVisible();
+    await expect(page.getByRole('button', { name: /ASML Holding Foundry/ })).toBeDisabled();
+    // The POST carried the keywords split on commas.
+    expect(seekBody).not.toBeNull();
+    expect(seekBody!.keywords).toEqual(['HBM', 'packaging']);
+
+    // Clicking the TSM candidate fills the ticker input with its first symbol.
+    await tsm.click();
+    await expect(page.getByLabel('Ticker')).toHaveValue('TSM');
+  });
+
+  test('serenity seek: an upstream error surfaces "Seek failed." and the button re-enables', async ({ page }) => {
+    await openSerenitySeek(page);
+    await page.route(SEEK_URL, (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'edgar fts unavailable' }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Seek Candidates' }).click();
+
+    await expect(page.getByText(/Seek failed\./)).toBeVisible();
+    await expect(page.getByText(/edgar fts unavailable/)).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Seek Candidates' })).toBeEnabled(); // retryable
+  });
+
+  test('serenity seek: a zero-candidate result renders the explicit empty-state message', async ({ page }) => {
+    await openSerenitySeek(page);
+    await page.route(SEEK_URL, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ candidates: [], errors: [] }),
+      }),
+    );
+
+    await page.getByRole('button', { name: 'Seek Candidates' }).click();
+
+    await expect(page.getByText('No candidates matched these keywords.')).toBeVisible();
+  });
+
+  test('serenity seek: the button is disabled while the seek is in flight', async ({ page }) => {
+    await openSerenitySeek(page);
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(SEEK_URL, async (route) => {
+      await held;
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(SEEK_RESULT),
+      });
+    });
+
+    const seek = page.getByRole('button', { name: 'Seek' });
+    await seek.click();
+    try {
+      await expect(seek).toBeDisabled(); // in-flight seek disables the control
+      await expect(seek).toHaveText('Seeking…'); // label flips while in-flight
+    } finally {
+      release(); // guarantee unblock even if an assertion fails — avoids a 30s CI hang on regression
+    }
+    await expect(page.getByRole('button', { name: /Taiwan Semiconductor/ })).toBeVisible();
+    await expect(seek).toBeEnabled(); // settled → re-enabled
   });
 
   // Issue #76 — E2E coverage for the Pools Refresh button (shipped in PR #75). `name: 'Refresh'`
