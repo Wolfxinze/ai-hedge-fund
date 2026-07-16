@@ -140,9 +140,26 @@ def refresh_pool(
     if not config.dry_run:
         session.add(run)
         session.flush()  # need run.id for entry FK
+        # RELEASE the SQLite write lock before the multi-minute committee phase. upsert_candidates
+        # (and this add) flushed DML, so a write lock is held; keeping it across run_analysts starved
+        # every concurrent writer (e.g. POST /serenity/discover) into 'database is locked' after the
+        # 30s busy timeout. Commit → lock released → committee runs lock-free; the final write phase
+        # re-acquires briefly at the end (its commit stays the caller's, per session_scope/route).
+        session.commit()
 
     committee = config.selected_analysts or committee_analyst_keys()
-    analyst_signals, token_cost = ({}, {"calls": 0}) if not candidate_tickers else run_analysts(candidate_tickers, committee, end_date)
+    try:
+        analyst_signals, token_cost = ({}, {"calls": 0}) if not candidate_tickers else run_analysts(candidate_tickers, committee, end_date)
+    except Exception as exc:
+        # The committee crashed AFTER the RUNNING row was committed: mark it failed and commit that
+        # (the caller's session_scope rolls back on exception, which would otherwise discard the
+        # status), then re-raise — no orphaned RUNNING rows survive a crash.
+        if not config.dry_run:
+            run.status = RefreshRunStatus.ERROR.value
+            run.error = f"run_analysts failed: {type(exc).__name__}: {exc}"[:500]
+            run.completed_at = _now()
+            session.commit()
+        raise
 
     # Score every candidate.
     scored: list[ScoredCandidate] = []
