@@ -414,6 +414,42 @@ test.describe('Observing Pools — research-only invariants', () => {
     await expect(seek).toBeEnabled(); // settled → re-enabled
   });
 
+  test('serenity seek: a long candidate list is height-bounded and scrolls internally', async ({ page }) => {
+    // A 12-row result must not push the seek panel arbitrarily tall — the ul carries
+    // `max-h-64 overflow-y-auto`, so it clamps and scrolls internally. Strip that bound and this
+    // regresses: the box grows past 280px and scrollHeight collapses to clientHeight.
+    const candidates = Array.from({ length: 12 }, (_, idx) => {
+      const i = idx + 1;
+      return {
+        cik: String(i).padStart(10, '0'),
+        company: `Filler Corp ${i}`,
+        tickers: [`FIL${i}`],
+        hits: 13 - i, // descending: 12 → 1
+        latest_filing_date: '2026-01-01',
+      };
+    });
+
+    await openSerenitySeek(page);
+    await page.route(SEEK_URL, (route) => route.fulfill({ json: { candidates, errors: [] } }));
+
+    await page.getByRole('button', { name: 'Seek Candidates' }).click();
+
+    // (1) all 12 rows are attached — first is visible, last is present in the (scrollable) DOM.
+    await expect(page.getByRole('button', { name: /^Filler Corp 1 FIL1\b/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Filler Corp 12/ })).toBeAttached();
+
+    // (2) the candidate <ul> is height-bounded (max-h-64 == 16rem == 256px, so <= 280 with padding).
+    const list = page
+      .getByRole('list')
+      .filter({ has: page.getByRole('button', { name: /Filler Corp 1/ }) });
+    const box = await list.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.height).toBeLessThanOrEqual(280);
+
+    // (3) the content overflows the clamped box — it scrolls internally rather than growing the panel.
+    expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  });
+
   // Issue #76 — E2E coverage for the Pools Refresh button (shipped in PR #75). `name: 'Refresh'`
   // is a substring match, so the same locator resolves the button as its label flips to "Refreshing…".
   test('pools refresh: happy path surfaces "Refresh complete." and re-fetches the pool', async ({ page }) => {

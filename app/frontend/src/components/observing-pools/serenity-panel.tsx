@@ -271,7 +271,7 @@ export function SerenityPanel() {
             <div className="text-sm text-muted-foreground">{t('observingPools.seekEmpty')}</div>
           )}
           {seekCandidates.length > 0 && (
-            <ul className="space-y-2">
+            <ul className="max-h-64 space-y-2 overflow-y-auto pr-1">
               {seekCandidates.map((candidate) => {
                 const firstTicker = candidate.tickers[0];
                 const disabled = !firstTicker;
@@ -282,7 +282,7 @@ export function SerenityPanel() {
                       disabled={disabled}
                       onClick={() => fillTickerFromCandidate(firstTicker)}
                       className={
-                        'w-full rounded-lg border bg-card p-3 text-left text-card-foreground shadow-sm transition-colors ' +
+                        'w-full rounded-lg border bg-card px-3 py-2 text-left text-card-foreground shadow-sm transition-colors ' +
                         (disabled
                           ? 'cursor-not-allowed opacity-60'
                           : 'cursor-pointer hover:border-primary hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none')
