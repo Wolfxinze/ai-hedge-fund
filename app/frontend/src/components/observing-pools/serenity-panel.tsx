@@ -9,7 +9,7 @@ import { useI18n } from '@/i18n/use-i18n';
 import { observingPoolsApi, SerenityRecord, SerenitySeekCandidate } from '@/services/observing-pools-api';
 
 import { DisclaimerBanner } from './disclaimer-banner';
-import { actionVariant, EM_DASH, fmt, gradeVariant } from './lib';
+import { ACTION_LABEL_KEYS, actionVariant, EM_DASH, fmt, gradeVariant, localizeDisclaimer } from './lib';
 
 // Mirrors src/serenity/grading.SCORECARD_DIMENSIONS — order and keys must match, the backend
 // 422s on any drift. Each dimension is scored 0-4 by the user (their judgment, never defaulted
@@ -78,6 +78,16 @@ export function SerenityPanel() {
       mounted.current = false;
     };
   }, []);
+
+  // Scroll the report cards into view after a search success or a discover re-fetch populates them.
+  // `records` is only replaced by those user-triggered flows, so the length>0 guard keeps the
+  // initial mount (empty list) from scrolling.
+  const recordsRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (searched && records.length > 0) {
+      recordsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [records, searched]);
 
   const search = (event: FormEvent) => {
     event.preventDefault();
@@ -345,7 +355,7 @@ export function SerenityPanel() {
         {discoverError && <div className="text-sm text-destructive">{discoverError}</div>}
       </form>
 
-      <div className="space-y-3">
+      <div className="space-y-3" ref={recordsRef}>
         {records.map((record) => (
           <div key={record.id} className="rounded-lg border bg-card p-3 text-card-foreground shadow-sm">
             <div className="flex flex-wrap items-center gap-2">
@@ -356,7 +366,12 @@ export function SerenityPanel() {
               </Badge>
               {record.recommended_action && (
                 <Badge variant={actionVariant(record.recommended_action)} className="capitalize">
-                  {record.recommended_action}
+                  {(() => {
+                    const key = record.recommended_action.toLowerCase();
+                    return key in ACTION_LABEL_KEYS
+                      ? t(ACTION_LABEL_KEYS[key as keyof typeof ACTION_LABEL_KEYS])
+                      : record.recommended_action;
+                  })()}
                 </Badge>
               )}
               <span className="text-xs text-muted-foreground">
@@ -387,7 +402,7 @@ export function SerenityPanel() {
 
             <DisclaimerBanner
               variant="inline"
-              text={record.disclaimer || EM_DASH}
+              text={localizeDisclaimer(record.disclaimer, t) ?? EM_DASH}
               version={record.disclaimer_version}
             />
           </div>

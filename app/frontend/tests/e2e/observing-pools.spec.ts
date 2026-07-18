@@ -320,6 +320,57 @@ test.describe('Observing Pools — research-only invariants', () => {
     await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toHaveCount(0);
   });
 
+  test('serenity discover: success scrolls the report card into view', async ({ page }) => {
+    // A short viewport forces the record card to start below the fold, so the auto-scroll effect in
+    // serenity-panel.tsx is the only thing that can bring it into view — remove that effect and this
+    // test regresses (toBeInViewport fails at 500px height).
+    await page.setViewportSize({ width: 1280, height: 500 });
+
+    await openSerenityDiscover(page);
+    await page.getByRole('button', { name: 'Discover' }).click();
+
+    await expect(page.getByText('Built 1 research record(s) from 3 reference(s).')).toBeVisible();
+    // The record card is scrolled into view after the discover re-fetch populates it.
+    await expect(page.getByText(/Grade: B/)).toBeInViewport();
+  });
+
+  test('serenity research: zh-CN renders translated action + canonical disclaimer, sentinel text passes through verbatim', async ({ page }) => {
+    // Byte-exact copy of src/compliance.py DISCLAIMER (== lib.ts CANONICAL_DISCLAIMER_EN). Only this
+    // exact stored value is swapped for the localized (zh) disclaimer; any other value renders verbatim.
+    const CANONICAL_EN =
+      'Research and educational use only. This output is not investment advice, not a recommendation to buy or sell any security, and carries no guarantee of accuracy or performance. It contains no trade-execution instructions. Descriptive labels and promote/hold/demote statuses describe research priority, not trading directives. Conduct your own due diligence; consult a licensed professional before investing.';
+    // Two records copying the SERENITY_AAPL shape: record 1 carries the canonical disclaimer (→ localized
+    // in zh) with a demote action; record 2 carries the sentinel UNKNOWN disclaimer (→ verbatim, drift-safe).
+    const records = [
+      {
+        id: 1, ticker: 'AAPL', platform_key: 'ai', theme: 'AI infra', chain_layer: 'compute',
+        bottleneck_hypothesis: 'HBM supply constraint', evidence_grade: 'B', serenity_score: 68,
+        recommended_action: 'demote', disclaimer: CANONICAL_EN, disclaimer_version: '2026-06',
+      },
+      {
+        id: 2, ticker: 'AAPL', platform_key: 'ai', theme: 'AI infra', chain_layer: 'compute',
+        bottleneck_hypothesis: 'HBM supply constraint', evidence_grade: 'B', serenity_score: 68,
+        recommended_action: 'hold', disclaimer: STORED_DISCLAIMER, disclaimer_version: '2026-06',
+      },
+    ];
+    await page.route(RESEARCH_URL_GLOB, (route) => route.fulfill({ json: records }));
+
+    await openObservingPools(page);
+    await page.getByRole('tab', { name: 'Serenity' }).click();
+    await page.getByLabel('Ticker').fill('AAPL');
+    // Switch to zh-CN, then search via the translated button label.
+    await page.getByRole('button', { name: 'EN / 中文' }).click();
+    await page.getByRole('button', { name: '搜索' }).click();
+
+    // (1) The demote action badge is translated. `exact` targets the badge (whose text is exactly
+    // "降级") and excludes the localized disclaimer, which also contains "降级" as a substring.
+    await expect(page.getByText('降级', { exact: true })).toBeVisible();
+    // (2) The canonical disclaimer renders in Chinese (only the localized canonical text matches this).
+    await expect(page.getByText(/仅供研究与教育用途。本输出不构成投资建议/)).toBeVisible();
+    // (3) The sentinel record's UNKNOWN disclaimer still renders verbatim — drift-safety pin.
+    await expect(page.getByText(new RegExp(STORED_DISCLAIMER))).toBeVisible();
+  });
+
   // Serenity Seek flow (POST /serenity/seek): the UNKNOWN-ticker path. Keywords alone (no ticker)
   // enable the seek; the ranked candidate list pre-fills the ticker on click.
   async function openSerenitySeek(page: Page) {

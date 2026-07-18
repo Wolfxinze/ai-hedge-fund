@@ -409,6 +409,11 @@ export const en = {
   'observingPools.rawMomentum': 'Raw momentum',
   'observingPools.haircut': 'Haircut',
   'observingPools.volatility': 'Volatility',
+  'observingPools.actionPromote': 'Promote',
+  'observingPools.actionHold': 'Hold',
+  'observingPools.actionDemote': 'Demote',
+  'observingPools.storedDisclaimer':
+    'Research and educational use only. This output is not investment advice, not a recommendation to buy or sell any security, and carries no guarantee of accuracy or performance. It contains no trade-execution instructions. Descriptive labels and promote/hold/demote statuses describe research priority, not trading directives. Conduct your own due diligence; consult a licensed professional before investing.',
 } as const;
 
 export type TranslationKey = keyof typeof en;
@@ -824,6 +829,11 @@ export const zhCN: Record<TranslationKey, string> = {
   'observingPools.rawMomentum': '原始动量',
   'observingPools.haircut': '风险扣减',
   'observingPools.volatility': '年化波动率',
+  'observingPools.actionPromote': '提升',
+  'observingPools.actionHold': '保持',
+  'observingPools.actionDemote': '降级',
+  'observingPools.storedDisclaimer':
+    '仅供研究与教育用途。本输出不构成投资建议，不构成买卖任何证券的推荐，也不保证准确性或表现。其中不含任何交易执行指令。描述性标签与提升/保持/降级状态仅表示研究优先级，并非交易指令。请自行开展尽职调查，并在投资前咨询持牌专业人士。',
 };
 
 export const translations = {

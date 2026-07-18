@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils';
 import type { OpportunityReport } from '@/services/observing-pools-api';
 
 import { DisclaimerBanner } from './disclaimer-banner';
-import { EM_DASH, fmt } from './lib';
+import { EM_DASH, fmt, localizeDisclaimer } from './lib';
 
 // Renders a string[] section (risks / next checks) only when the JSON actually is a string list,
 // so an unexpected shape degrades to "hidden" rather than to a broken render.
@@ -86,7 +86,7 @@ export function ReportCard({ report }: { report: OpportunityReport }) {
       {/* Disclaimer invariant: rendered from the stored string on every report. */}
       <DisclaimerBanner
         variant="inline"
-        text={report.disclaimer || EM_DASH}
+        text={localizeDisclaimer(report.disclaimer, t) ?? EM_DASH}
         version={report.disclaimer_version}
       />
     </div>
