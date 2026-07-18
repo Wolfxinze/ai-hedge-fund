@@ -3,11 +3,41 @@
 // in one place so every panel renders them identically.
 
 import type { BadgeProps } from '@/components/ui/badge';
+import type { TranslationKey } from '@/i18n/translations';
 import type { PoolEntry } from '@/services/observing-pools-api';
 
 type BadgeVariant = NonNullable<BadgeProps['variant']>;
 
 export const EM_DASH = '—';
+
+// Byte-exact copy of src/compliance.py DISCLAIMER (the single backend source of the disclaimer
+// text). MUST track that constant: if the backend text changes, update this or localizeDisclaimer
+// will fall through to rendering the new backend string verbatim (drift-safe by design).
+export const CANONICAL_DISCLAIMER_EN =
+  'Research and educational use only. This output is not investment advice, not a recommendation to buy or sell any security, and carries no guarantee of accuracy or performance. It contains no trade-execution instructions. Descriptive labels and promote/hold/demote statuses describe research priority, not trading directives. Conduct your own due diligence; consult a licensed professional before investing.';
+
+// Recommended-action value (lowercased) → its translation key. String literals so
+// scripts/check-observing-pools-keys.mjs sees these keys as referenced.
+export const ACTION_LABEL_KEYS = {
+  promote: 'observingPools.actionPromote',
+  hold: 'observingPools.actionHold',
+  demote: 'observingPools.actionDemote',
+} as const satisfies Record<string, TranslationKey>;
+
+/**
+ * Localize a STORED disclaimer for display. Returns the translated canonical disclaimer ONLY when
+ * the stored value is byte-identical to CANONICAL_DISCLAIMER_EN; any other non-empty value renders
+ * verbatim (drift-safety: an unknown/changed backend disclaimer must never be swapped for a
+ * translation of a DIFFERENT version). null/undefined/empty → null.
+ */
+export function localizeDisclaimer(
+  stored: string | null | undefined,
+  t: (key: TranslationKey) => string,
+): string | null {
+  if (!stored) return null;
+  if (stored === CANONICAL_DISCLAIMER_EN) return t('observingPools.storedDisclaimer');
+  return stored;
+}
 
 /**
  * Data-unavailable values render as an em dash, NEVER as 0 (PRD §11 / Phase-10 invariant).
