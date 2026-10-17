@@ -69,8 +69,13 @@ def test_signals_are_immutable(tmp_path):
         (_doc(_entry(confidence=True)), "AAA"),
         (_doc(_entry(confidence=-0.1)), "AAA"),
         (_doc(_entry(confidence=100.5)), "AAA"),
+        # Python's json accepts these non-standard tokens; NaN would slip past a naive
+        # range check and poison the committee mean.
+        ('{"as_of": "2026-01-09", "signals": {"warren_buffett": {"AAA": {"signal": "bullish", "confidence": NaN}}}}', "AAA"),
+        ('{"as_of": "2026-01-09", "signals": {"warren_buffett": {"AAA": {"signal": "bullish", "confidence": Infinity}}}}', "AAA"),
+        ('{"as_of": "2026-01-09", "signals": {"warren_buffett": {"AAA": {"signal": "bullish", "confidence": -Infinity}}}}', "AAA"),
     ],
-    ids=["bad-json", "missing-as_of", "bad-as_of", "signals-not-dict", "agent-suffix", "unknown-analyst", "lowercase-ticker", "long-ticker", "bad-signal", "missing-confidence", "string-confidence", "bool-confidence", "negative-confidence", "over-100-confidence"],
+    ids=["bad-json", "missing-as_of", "bad-as_of", "signals-not-dict", "agent-suffix", "unknown-analyst", "lowercase-ticker", "long-ticker", "bad-signal", "missing-confidence", "string-confidence", "bool-confidence", "negative-confidence", "over-100-confidence", "nan-confidence", "infinity-confidence", "neg-infinity-confidence"],
 )
 def test_invalid_files_raise_naming_the_offender(tmp_path, doc, needle):
     with pytest.raises(ValueError, match=needle):

@@ -54,9 +54,15 @@ def _holdings(tmp_path, body="AAA,10,100,2026-01-02,\nBBB,5,50,2026-01-02,90\n")
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_trades_env(monkeypatch):
-    # A developer's shell export must never leak a real ledger into these runs.
+def _no_ambient_trades_env(monkeypatch, tmp_path):
+    # A developer's shell export must never leak a real ledger into these runs, and the
+    # repo-anchored defaults must never resolve to the owner's REAL holdings/ledger.
+    from src.bit_pool import holdings
+
     monkeypatch.delenv("BIT_POOL_TRADES_PATH", raising=False)
+    monkeypatch.delenv("BIT_POOL_PATH", raising=False)
+    monkeypatch.setattr(holdings, "DEFAULT_HOLDINGS_PATH", tmp_path / "anchored" / "bit_pool.csv")
+    monkeypatch.setattr(holdings, "DEFAULT_TRADES_PATH", tmp_path / "anchored" / "bit_pool_trades.csv")
 
 
 def _ledger(tmp_path, body="", name="trades.csv"):
@@ -214,12 +220,19 @@ def test_committee_full_without_provider_and_model_exits_1(tmp_path, prices, mon
 def test_committee_core_needs_no_provider_or_model(tmp_path, prices, monkeypatch):
     from src.observing_pools import scoring_graph
 
-    calls: list = []
-    monkeypatch.setattr(scoring_graph, "run_scoring_analysts", _fake_scoring(calls))
+    kwargs: list[dict] = []
+
+    def fake(tickers, selected_analysts, end_date, **kw):
+        kwargs.append(kw)
+        (ticker,) = tickers
+        return {f"{k}_agent": {ticker: {"signal": "bullish", "confidence": 80}} for k in selected_analysts}, {}
+
+    monkeypatch.setattr(scoring_graph, "run_scoring_analysts", fake)
     code, _ = _run(tmp_path, "--committee", "core")
-    assert code == 0
+    assert code == 0 and len(kwargs) == 2
     # Nothing forced through: the runner's own defaults apply (core analysts are LLM-free).
-    assert all((c["model"], c["provider"]) == ("gpt-4.1", "OpenAI") for c in calls)
+    # Checked on the kwargs actually passed — a fake's own defaults would mask a forced value.
+    assert all("model_name" not in kw and "model_provider" not in kw for kw in kwargs)
 
 
 def test_committee_exception_degrades_one_ticker_without_aborting(tmp_path, prices, monkeypatch):
@@ -310,6 +323,28 @@ def test_muse_bad_file_content_exits_1(tmp_path, prices, capsys):
     assert "AAA" in capsys.readouterr().err
 
 
+def test_muse_dir_file_with_internal_as_of_after_run_date_exits_1(tmp_path, prices, capsys):
+    # The filename picks the file, but the content's own as_of is authoritative: a file
+    # named for the run date that claims a later as_of is inconsistent -> error, not data.
+    sig_dir = tmp_path / "signals"
+    sig_dir.mkdir()
+    _muse_file(sig_dir / "2026-01-09.json", as_of="2026-01-12")
+    code, data, _ = _run_muse(tmp_path, "--muse-signals", str(sig_dir))
+    assert code == 1 and data is None
+    assert "2026-01-12" in capsys.readouterr().err
+
+
+def test_muse_dir_file_with_much_older_internal_as_of_is_stale(tmp_path, prices):
+    # A fresh filename must not launder old content: staleness follows the internal as_of.
+    sig_dir = tmp_path / "signals"
+    sig_dir.mkdir()
+    _muse_file(sig_dir / "2026-01-09.json", as_of="2025-12-20")
+    code, data, _ = _run_muse(tmp_path, "--muse-signals", str(sig_dir))
+    assert code == 1
+    assert all(c["band"] is None and "stale" in c["degraded_reason"] and "2025-12-20" in c["degraded_reason"] for c in data["committee"])
+    assert data["committee_signals_as_of"] == "2025-12-20"
+
+
 def test_muse_without_signals_path_exits_1(tmp_path, prices, monkeypatch, capsys):
     monkeypatch.delenv("MUSE_SIGNALS_PATH", raising=False)
     code, data, _ = _run_muse(tmp_path)
@@ -374,7 +409,7 @@ def test_explicit_missing_trades_file_exits_1_and_writes_nothing(tmp_path, price
 
 
 def test_implicit_default_trades_may_be_absent(tmp_path, prices, monkeypatch):
-    monkeypatch.chdir(tmp_path)  # no data/pools/bit_pool_trades.csv here
+    monkeypatch.chdir(tmp_path)  # anchored default (autouse fixture) does not exist
     code = cli.main(["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path)), "--out", str(tmp_path / "o")])
     assert code == 0
     data = _json(tmp_path / "o")
@@ -383,12 +418,34 @@ def test_implicit_default_trades_may_be_absent(tmp_path, prices, monkeypatch):
 
 
 def test_implicit_default_trades_used_when_present(tmp_path, prices, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "data" / "pools").mkdir(parents=True)
-    _ledger(tmp_path / "data" / "pools", "2026-01-05,AAA,buy,1,100,\n", name="bit_pool_trades.csv")
+    from src.bit_pool import holdings
+
+    (tmp_path / "anchored").mkdir()
+    anchored = _ledger(tmp_path / "anchored", "2026-01-05,AAA,buy,1,100,\n", name="bit_pool_trades.csv")
+    assert holdings.DEFAULT_TRADES_PATH == anchored
     assert cli.main(["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path)), "--out", str(tmp_path / "o")]) == 0
     data = _json(tmp_path / "o")
-    assert (data["trades_source"], data["trades_applied"]) == ("data/pools/bit_pool_trades.csv", 1)
+    assert (data["trades_source"], data["trades_applied"]) == (str(anchored), 1)
+
+
+def test_implicit_defaults_ignore_the_cwd(tmp_path, prices, monkeypatch):
+    # cron starts in $HOME: a CWD-relative default would read the wrong (or no) ledger
+    # and silently drop fills. A decoy CWD-relative ledger must be ignored.
+    from src.bit_pool import holdings
+
+    cwd = tmp_path / "cron_home"
+    (cwd / "data" / "pools").mkdir(parents=True)
+    _ledger(cwd / "data" / "pools", "2026-01-05,AAA,sell,999,100,\n", name="bit_pool_trades.csv")  # would oversell -> exit 1
+    _holdings(cwd / "data" / "pools", "ZZZ,1,10,2026-01-02,\n").rename(cwd / "data" / "pools" / "bit_pool.csv")
+    monkeypatch.chdir(cwd)
+    (tmp_path / "anchored").mkdir()
+    _holdings(tmp_path / "anchored").rename(holdings.DEFAULT_HOLDINGS_PATH)
+    _ledger(tmp_path / "anchored", "2026-01-05,AAA,buy,2,100,\n", name="bit_pool_trades.csv")
+    out = tmp_path / "o"
+    assert cli.main(["run", "--date", "2026-01-09", "--out", str(out)]) == 0
+    data = _json(out)
+    assert {p["ticker"]: p["shares"] for p in data["positions"]} == {"AAA": 12.0, "BBB": 5.0}
+    assert (data["trades_source"], data["trades_applied"]) == (str(holdings.DEFAULT_TRADES_PATH), 1)
 
 
 def test_trades_path_from_env_is_honoured_and_counts_only_rows_through_as_of(tmp_path, prices, monkeypatch):

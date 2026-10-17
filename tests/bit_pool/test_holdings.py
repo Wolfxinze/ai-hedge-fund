@@ -48,8 +48,23 @@ def _t(d, ticker, side, shares, price) -> Trade:
 def test_header_and_default_path_contract():
     assert HOLDINGS_COLUMNS == ("ticker", "shares", "baseline_price", "baseline_date", "cost_basis")
     assert TRADES_COLUMNS == ("date", "ticker", "side", "shares", "price", "note")
-    assert DEFAULT_HOLDINGS_PATH == Path("data/pools/bit_pool.csv")
+    # Anchored to the repo root, not the CWD: a cron job started elsewhere must not
+    # silently miss the holdings file or (worse) the trades ledger and drop fills.
+    assert DEFAULT_HOLDINGS_PATH == _REPO / "data/pools/bit_pool.csv"
+    assert DEFAULT_HOLDINGS_PATH.is_absolute()
     assert HOLDINGS_PATH_ENV == "BIT_POOL_PATH"
+
+
+def test_default_paths_do_not_depend_on_cwd(tmp_path, monkeypatch):
+    from src.bit_pool.holdings import DEFAULT_TRADES_PATH, resolve_trades_path
+
+    assert DEFAULT_TRADES_PATH == _REPO / "data/pools/bit_pool_trades.csv"
+    monkeypatch.chdir(tmp_path)
+    assert resolve_holdings_path(None, {}) == _REPO / "data/pools/bit_pool.csv"
+    assert resolve_trades_path(None, {}) == (_REPO / "data/pools/bit_pool_trades.csv", False)
+    # env overrides still win over the anchored defaults
+    assert resolve_holdings_path(None, {"BIT_POOL_PATH": "env.csv"}) == Path("env.csv")
+    assert resolve_trades_path(None, {"BIT_POOL_TRADES_PATH": "envt.csv"}) == (Path("envt.csv"), True)
 
 
 def test_resolve_holdings_path_precedence():
@@ -255,13 +270,23 @@ def test_extra_field_rejected_with_line_and_ticker(tmp_path):
 
 
 def test_missing_field_rejected_with_line_and_ticker(tmp_path):
-    p = _write(tmp_path, "AAA,1,10,2026-01-02,\nBBB,1,10,2026-01-02\n")
+    # Only the trailing optional cost_basis may be omitted; a row short of a REQUIRED field raises.
+    p = _write(tmp_path, "AAA,1,10,2026-01-02,\nBBB,1,10\n")
     with pytest.raises(ValueError, match="line 3.*BBB.*missing"):
         load_holdings(p)
 
 
+def test_trailing_optional_column_may_be_omitted_entirely(tmp_path):
+    # Hand-edited CSVs often drop the trailing comma of a blank last field; that is
+    # unambiguous (the optional column is the last one), so accept it as blank.
+    p = _write(tmp_path, "AAA,1,10,2026-01-02\n")
+    assert load_holdings(p) == (Holding("AAA", 1.0, 10.0, date(2026, 1, 2), None),)
+    t = _write(tmp_path, "2026-01-05,AAA,buy,2,110\n", name="t.csv", header=_TRADES_HEADER)
+    assert load_trades(t) == (Trade(date(2026, 1, 5), "AAA", "buy", 2.0, 110.0, ""),)
+
+
 def test_trades_missing_and_extra_fields_rejected(tmp_path):
-    short = _write(tmp_path, "2026-01-05,AAA,buy,2,110\n", name="t.csv", header=_TRADES_HEADER)
+    short = _write(tmp_path, "2026-01-05,AAA,buy,2\n", name="t.csv", header=_TRADES_HEADER)
     with pytest.raises(ValueError, match="line 2.*AAA.*missing"):
         load_trades(short)
     long = _write(tmp_path, "2026-01-05,AAA,buy,2,110,n,x\n", name="t2.csv", header=_TRADES_HEADER)
@@ -324,3 +349,31 @@ def test_resolve_trades_path_precedence_and_explicitness():
     assert resolve_trades_path(None, {TRADES_PATH_ENV: "env.csv"}) == (Path("env.csv"), True)
     assert resolve_trades_path(None, {}) == (DEFAULT_TRADES_PATH, False)
     assert TRADES_PATH_ENV == "BIT_POOL_TRADES_PATH"
+
+
+# ── unquoted thousands separators: a comma inside a number must never shift fields ──
+def test_numeric_note_is_rejected_as_a_comma_spill_naming_the_line(tmp_path):
+    # `234.50` was meant as the price `1,234.50`; unquoted, the CSV reads price=1 and
+    # note='234.50' — a 99.9% wrong fill that used to load silently and exit 0.
+    p = _write(tmp_path, "2026-01-05,AAA,buy,1,110,\n2026-10-10,AAPL,buy,10,1,234.50\n", name="t.csv", header=_TRADES_HEADER)
+    with pytest.raises(ValueError, match="note looks like a number on line 3 — quote numbers containing commas"):
+        load_trades(p)
+
+
+@pytest.mark.parametrize("note", ["1,000", "42", "0.5"])
+def test_any_purely_numeric_note_is_rejected(tmp_path, note):
+    p = _write(tmp_path, f'2026-01-05,AAA,buy,2,110,"{note}"\n', name="t.csv", header=_TRADES_HEADER)
+    with pytest.raises(ValueError, match="note looks like a number on line 2"):
+        load_trades(p)
+
+
+def test_quoted_thousands_price_and_textual_note_load(tmp_path):
+    p = _write(tmp_path, '2026-10-10,AAPL,buy,10,"1234.50",bought 10 @ 1.2k\n', name="t.csv", header=_TRADES_HEADER)
+    assert load_trades(p)[0].price == 1234.5 and load_trades(p)[0].note == "bought 10 @ 1.2k"
+
+
+def test_holdings_cost_basis_comma_spill_raises(tmp_path):
+    # Already-correct behaviour pinned: the spill lands as an extra field.
+    p = _write(tmp_path, "AAPL,10,100,2026-01-02,1,234.50\n")
+    with pytest.raises(ValueError, match="line 2.*AAPL.*extra"):
+        load_holdings(p)

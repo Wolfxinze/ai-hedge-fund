@@ -8,9 +8,9 @@ moves and descriptive alerts. Percent fields are percentages (``-6.84`` means -6
 Price rows are reduced to one per calendar date (the last row for that date), so
 ``prev_close`` is always the prior session. Intraday guard: before 16:15 ET on the
 current ET date, that date's bar is still forming and is ignored (the prior close is
-used). ``PoolSnapshot.prices_as_of`` is the most common close date across priced
-positions (ties → the later date); a position on a different date gets
-``MIXED_DATE``.
+used); ``STALE`` is measured from that cutoff date, not ``as_of``.
+``PoolSnapshot.prices_as_of`` is the most common close date across priced positions
+(ties → the later date); a position on a different date gets ``MIXED_DATE``.
 
 Fail-loud degradation: a position whose fetch raises, or that has fewer than two
 usable closes, is marked degraded with a reason, excluded from every total and
@@ -96,7 +96,7 @@ def _pct(now: float | None, then: float | None) -> float | None:
     return (now / then - 1.0) * 100.0 if now is not None and then is not None and then > 0 else None
 
 
-def _alerts(daily_pct: float, vs_baseline_pct: float, close_date: date, as_of: date) -> tuple[str, ...]:
+def _alerts(daily_pct: float, vs_baseline_pct: float, close_date: date, cutoff: date) -> tuple[str, ...]:
     out: list[str] = []
     if abs(daily_pct) >= DAILY_MOVE_PCT - _EPS:
         out.append("DAILY_MOVE")
@@ -106,7 +106,10 @@ def _alerts(daily_pct: float, vs_baseline_pct: float, close_date: date, as_of: d
         out.append("BASELINE_WARN")
     elif vs_baseline_pct >= BASELINE_REVIEW_PCT - _EPS:
         out.append("BASELINE_REVIEW")
-    if (as_of - close_date).days > STALE_DAYS:
+    # Measured from the last session the intraday guard allows, not as_of: before the
+    # close settles (or ahead of ET) as_of has no bar yet, so counting from it would
+    # flag a post-holiday morning run STALE.
+    if (cutoff - close_date).days > STALE_DAYS:
         out.append("STALE")
     return tuple(out)
 
@@ -162,7 +165,7 @@ def _mark(h: Holding, as_of: date, cutoff: date, fetch_prices: FetchPrices) -> P
         vs_baseline_pct=vs_baseline_pct,
         cost_basis=h.cost_basis,
         unrealized_pnl=unrealized,
-        alerts=_alerts(daily_pct, vs_baseline_pct, close_date, as_of),
+        alerts=_alerts(daily_pct, vs_baseline_pct, close_date, cutoff),
         degraded_reason=None,
     )
 

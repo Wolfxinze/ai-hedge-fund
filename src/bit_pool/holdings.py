@@ -30,8 +30,12 @@ from pathlib import Path
 
 HOLDINGS_COLUMNS = ("ticker", "shares", "baseline_price", "baseline_date", "cost_basis")
 TRADES_COLUMNS = ("date", "ticker", "side", "shares", "price", "note")
-DEFAULT_HOLDINGS_PATH = Path("data/pools/bit_pool.csv")
-DEFAULT_TRADES_PATH = Path("data/pools/bit_pool_trades.csv")
+# Anchored to the repo root (not the CWD) so a cron job started elsewhere can't miss
+# the ledger — the implicit trades default may be absent, so a CWD miss would
+# silently drop every fill.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_HOLDINGS_PATH = _REPO_ROOT / "data/pools/bit_pool.csv"
+DEFAULT_TRADES_PATH = _REPO_ROOT / "data/pools/bit_pool_trades.csv"
 HOLDINGS_PATH_ENV = "BIT_POOL_PATH"
 TRADES_PATH_ENV = "BIT_POOL_TRADES_PATH"
 SIDES = ("buy", "sell")
@@ -39,6 +43,10 @@ SIDES = ("buy", "sell")
 # Same conservative whitelist as observing_pools.universe: leading letter, then
 # letters/digits/.-, up to 10 chars.
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+# A note that is only digits/dots/commas is almost surely the tail of an unquoted
+# thousands separator (``1,234.50`` -> price=1, note='234.50'); the lookahead keeps a
+# digit-free note such as '...' legal.
+_NUMERIC_NOTE_RE = re.compile(r"^(?=.*\d)[\d.,]+$")
 # Share counts are floats (fractional shares); treat a residual below this as zero.
 _ZERO_SHARES = 1e-9
 
@@ -93,7 +101,13 @@ def resolve_trades_path(cli_value: str | None, env: Mapping[str, str]) -> tuple[
 
 
 def _read_rows(path: Path, expected: tuple[str, ...], kind: str) -> Iterable[tuple[int, dict[str, str]]]:
-    """Rows as (physical line number of the row's last line, fields); malformed shapes raise."""
+    """Rows as (physical line number of the row's last line, fields); malformed shapes raise.
+
+    The last expected column is optional; when it is also the header's last column a
+    row may omit it entirely (no trailing comma) and it reads as blank. Any other
+    short row, and any extra field, raises naming the line.
+    """
+    optional = expected[-1]
     rows: list[tuple[int, dict[str, str]]] = []
     try:
         with path.open(newline="", encoding="utf-8-sig") as fh:  # -sig: tolerate an Excel BOM
@@ -108,7 +122,9 @@ def _read_rows(path: Path, expected: tuple[str, ...], kind: str) -> Iterable[tup
                 if None in raw:
                     raise ValueError(f"{where}: extra fields {raw[None]!r} beyond the {len(header)}-column header")
                 absent = [k for k, v in raw.items() if v is None]
-                if absent:
+                if absent == [optional] and header[-1] == optional:
+                    raw = {**raw, optional: ""}
+                elif absent:
                     raise ValueError(f"{where}: missing fields {absent}")
                 rows.append((reader.line_num, raw))
     except UnicodeDecodeError as exc:
@@ -182,6 +198,9 @@ def load_trades(path: str | Path) -> tuple[Trade, ...]:
         side = (raw.get("side") or "").strip().lower()
         if side not in SIDES:
             raise ValueError(f"{where} ({ticker}): side must be one of {SIDES} (got {raw.get('side')!r})")
+        note = (raw.get("note") or "").strip()
+        if _NUMERIC_NOTE_RE.match(note):
+            raise ValueError(f"{where} ({ticker}): note looks like a number on line {lineno} — quote numbers containing commas (note={note!r})")
         out.append(
             Trade(
                 date=_iso_date(raw.get("date"), "date", where),
@@ -189,7 +208,7 @@ def load_trades(path: str | Path) -> tuple[Trade, ...]:
                 side=side,
                 shares=_positive(raw.get("shares"), "shares", where),
                 price=_positive(raw.get("price"), "price", where),
-                note=(raw.get("note") or "").strip(),
+                note=note,
             )
         )
     return tuple(out)

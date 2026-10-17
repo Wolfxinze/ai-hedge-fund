@@ -258,3 +258,51 @@ def test_trades_flow_into_snapshot():
     assert snap.total_value == pytest.approx(660.0)
     assert snap.realized_pnl == pytest.approx(120.0)
     assert snap.net_cash_flow == pytest.approx(520.0)
+
+
+# ── STALE is measured from the last session the intraday guard allows, not as_of ──
+def test_holiday_monday_with_guard_active_is_not_stale():
+    # as_of Wed 2026-01-21, but it is Tue 03:00 ET: the guard caps closes at Mon 01-19,
+    # which is a market holiday (MLK), so Fri 01-16 IS the latest possible close —
+    # 3 days before the cutoff, not 5 days before as_of. Flagging it STALE (exit 2)
+    # would cry wolf on every post-holiday morning run.
+    rows = [_p(100.0, "2026-01-15"), _p(101.0, "2026-01-16")]
+    now = datetime(2026, 1, 20, 3, 0, tzinfo=ET)
+    snap = simulate_day((_h("AAA", 1, 101.0),), (), date(2026, 1, 21), fetch_prices=_fetch_from({"AAA": rows}), now=now)
+    (p,) = snap.positions
+    assert p.close_date == date(2026, 1, 16)
+    assert "STALE" not in p.alerts
+
+
+def test_stale_still_fires_relative_to_the_guard_cutoff():
+    # Same guard (cutoff Mon 01-19); a close 5 days before the cutoff is genuinely stale.
+    rows = [_p(100.0, "2026-01-13"), _p(100.0, "2026-01-14")]
+    now = datetime(2026, 1, 20, 3, 0, tzinfo=ET)
+    snap = simulate_day((_h("AAA", 1, 100.0),), (), date(2026, 1, 21), fetch_prices=_fetch_from({"AAA": rows}), now=now)
+    assert "STALE" in snap.positions[0].alerts
+
+
+# ── pinned guards: a broken price never leaks into another position's numbers ──
+@pytest.mark.parametrize(("prev_close", "close"), [(100.0, 0.0), (0.0, 100.0), (100.0, float("nan")), (100.0, -1.0)], ids=["zero-close", "zero-prev", "nan-close", "negative-close"])
+def test_non_positive_or_nan_close_degrades_only_that_position(prev_close, close):
+    # Already-correct behaviour pinned. Without the guard a 0/-1 close would be summed
+    # into the pool (and given a weight), a NaN would poison every total, and a 0 prev
+    # close would crash the alert math.
+    table = {"AAA": [_p(prev_close, "2026-01-08"), _p(close, "2026-01-09")], "BBB": [_p(50.0, "2026-01-08"), _p(55.0, "2026-01-09")]}
+    snap = simulate_day((_h("AAA", 10, 100.0), _h("BBB", 2, 50.0)), (), AS_OF, fetch_prices=_fetch_from(table))
+    by = {p.ticker: p for p in snap.positions}
+    assert snap.degraded == ("AAA",)
+    assert "non-positive close" in by["AAA"].degraded_reason
+    assert by["AAA"].market_value is None and by["AAA"].weight is None
+    assert by["BBB"].market_value == pytest.approx(110.0) and by["BBB"].weight == pytest.approx(1.0)
+    assert (snap.total_value, snap.prev_total_value, snap.baseline_value) == (pytest.approx(110.0), pytest.approx(100.0), pytest.approx(100.0))
+
+
+def test_unparseable_price_row_degrades_with_reason():
+    # Already-correct behaviour pinned: an empty time string must not be guessed at.
+    table = {"AAA": [_p(100.0, "2026-01-08"), _p(101.0, "")], "BBB": [_p(50.0, "2026-01-08"), _p(55.0, "2026-01-09")]}
+    snap = simulate_day((_h("AAA", 1, 100.0), _h("BBB", 1, 50.0)), (), AS_OF, fetch_prices=_fetch_from(table))
+    by = {p.ticker: p for p in snap.positions}
+    assert snap.degraded == ("AAA",)
+    assert "unparseable price rows" in by["AAA"].degraded_reason
+    assert snap.total_value == pytest.approx(55.0)

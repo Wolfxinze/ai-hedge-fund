@@ -71,6 +71,8 @@ Bit Pool tracks the holdings you tell it about, marks them to the latest close e
 
 The persona layer and portfolio manager are an external AI agent called **Muse**, not a local model. Muse's orders are **simulated (paper) only**; real trades are placed only by the owner.
 
+**US-listed equities only.** The intraday guard (16:15 ET) and the `STALE` rule assume the US stock-market session. Non-US listings and crypto tickers are unsupported: their closes would be judged against the wrong session.
+
 ### Holdings file
 
 Every `data/pools/*.csv` except `*.example.csv` is gitignored, so your real holdings and ledgers never get committed. Copy the example and edit it:
@@ -85,9 +87,11 @@ Header (all five columns are required; the `cost_basis` *value* may be left blan
 ticker,shares,baseline_price,baseline_date,cost_basis
 ```
 
-The baseline is the position at the **end of day on `baseline_date`**. A blank `cost_basis` stays unknown: buys do not invent one, unrealized P&L is not shown, and realized P&L on a sell is measured against `baseline_price` and labelled "(vs baseline price — cost unknown)". Every malformed row (missing or extra fields, a non-number, `inf`/`nan`, a bad date or ticker) fails the run with its line number; a file with only a header is an error. UTF-8 with or without a BOM is accepted.
+The baseline is the position at the **end of day on `baseline_date`**. A blank `cost_basis` stays unknown: buys do not invent one, unrealized P&L is not shown, and realized P&L on a sell is measured against `baseline_price` and labelled "(vs baseline price — cost unknown)". Every malformed row (missing or extra fields, a non-number, `inf`/`nan`, a bad date or ticker) fails the run with its line number; a file with only a header is an error. UTF-8 with or without a BOM is accepted. A row may leave out the trailing `cost_basis` entirely (4 fields, no trailing comma) and it reads as blank; any other short row is an error.
 
-Override the path with the `BIT_POOL_PATH` environment variable or the `--holdings` flag.
+**Quote numbers that contain commas** (`"1,234.50"`), or write them without the separator (`1234.50`). An unquoted thousands separator splits one number into two fields, which shows up as an extra field and fails the run.
+
+Override the path with the `BIT_POOL_PATH` environment variable or the `--holdings` flag. The default `data/pools/bit_pool.csv` is resolved from the repo root, not the current directory, so a cron job started elsewhere still finds it.
 
 ### Trades ledger (optional)
 
@@ -97,7 +101,9 @@ Override the path with the `BIT_POOL_PATH` environment variable or the `--holdin
 date,ticker,side,shares,price,note
 ```
 
-Path precedence: `--trades` beats the `BIT_POOL_TRADES_PATH` environment variable beats `data/pools/bit_pool_trades.csv`. Only that implicit default may be absent (meaning no trades). A path you name explicitly, with the flag or the environment variable, must exist, or the run exits `1` with `trades ledger not found: <path>`, so a typo cannot silently drop your fills. Trades for a ticker in the holdings file dated **on or before its `baseline_date` are rejected** (they are already in the baseline), and so is a `--date` before any `baseline_date`. Selling more than you hold, including any sell of a ticker you do not hold, is an error. The report shows `Trades applied: N (source)`; the JSON has `trades_source` and `trades_applied`.
+A row may leave out the trailing `note` entirely (5 fields, no trailing comma). Quote numbers that contain commas here too: unquoted, `2026-10-10,AAPL,buy,10,1,234.50` would read as price `1` with note `234.50`, so a note that is only a number is rejected with `note looks like a number on line N — quote numbers containing commas`.
+
+Path precedence: `--trades` beats the `BIT_POOL_TRADES_PATH` environment variable beats `data/pools/bit_pool_trades.csv` (resolved from the repo root, not the current directory). Only that implicit default may be absent (meaning no trades). A path you name explicitly, with the flag or the environment variable, must exist, or the run exits `1` with `trades ledger not found: <path>`, so a typo cannot silently drop your fills. Trades for a ticker in the holdings file dated **on or before its `baseline_date` are rejected** (they are already in the baseline), and so is a `--date` before any `baseline_date`. Selling more than you hold, including any sell of a ticker you do not hold, is an error. The report shows `Trades applied: N (source)`; the JSON has `trades_source` and `trades_applied`.
 
 ### Run it
 
@@ -128,7 +134,7 @@ The committee table shows each ticker's coverage (valid analysts / committee siz
 Muse is a manager/trader agent that runs in a separate Muse account. Each day it reads the Bit Pool reports from a private reports repo and writes two things back into that repo:
 
 - `muse/signals/YYYY-MM-DD.json`: its analyst signals, consumed by `--committee muse`.
-- `muse/orders.csv`: **paper** orders, appended in the same schema as the trades ledger (`date,ticker,side,shares,price,note`).
+- `muse/orders.csv`: **paper** orders, appended in the same schema as the trades ledger (`date,ticker,side,shares,price,note`). Every order must be dated **after** the holdings' `baseline_date`; an order on or before it is rejected as already included in the baseline.
 
 Signals file schema (analyst keys are the bare committee keys such as `warren_buffett` or `technical_analyst`, with no `_agent` suffix):
 
@@ -165,7 +171,7 @@ Comparing the two books is how the system is verified. Muse's orders are simulat
 | vs baseline <= -10% | `BASELINE_WARN` |
 | vs baseline <= -20% | `BASELINE_HEAVY` (replaces `BASELINE_WARN`) |
 | vs baseline >= +20% | `BASELINE_REVIEW` |
-| last close more than 4 days before `--date` | `STALE` (counts as degraded: exit `2`) |
+| last close more than 4 days before the latest settled session allowed (`--date`, or earlier when the intraday guard drops it) | `STALE` (counts as degraded: exit `2`) |
 | position's close date differs from the pool's `Prices as of` date | `MIXED_DATE` |
 
 ### Exit codes

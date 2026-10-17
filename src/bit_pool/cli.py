@@ -11,7 +11,8 @@ the report is still written). Usage errors exit 1 (not argparse's default 2) so 
 always means "degraded".
 
 Trades ledger: ``--trades`` beats ``$BIT_POOL_TRADES_PATH`` beats
-``data/pools/bit_pool_trades.csv``; only that implicit default may be absent.
+``data/pools/bit_pool_trades.csv`` under the repo root (not the CWD, so cron can't
+silently miss it); only that implicit default may be absent.
 
 The committee (``--committee core|full``) runs the ai-hedge-fund scoring analysts
 per ticker via ``make_committee_analyzing_flow``; both it and the scoring graph are
@@ -33,7 +34,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from src.bit_pool.holdings import DEFAULT_TRADES_PATH, TRADES_PATH_ENV, Trade, load_holdings, load_trades, resolve_holdings_path, resolve_trades_path
+from src.bit_pool.holdings import TRADES_PATH_ENV, Trade, load_holdings, load_trades, resolve_holdings_path, resolve_trades_path
 from src.bit_pool.muse_bridge import MUSE_SIGNALS_ENV, is_stale, load_muse_signals, make_muse_runner, resolve_muse_signals
 from src.bit_pool.report import CommitteeSignal, render_markdown, to_json
 from src.bit_pool.simulate import PoolSnapshot, simulate_day
@@ -63,8 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="simulate one day and write <out>/<date>.json + .md")
     run.add_argument("--date", default=None, help="as-of date YYYY-MM-DD, not in the future (default: today, local date); run after the US close")
-    run.add_argument("--holdings", default=None, help="holdings CSV (default: $BIT_POOL_PATH or data/pools/bit_pool.csv)")
-    run.add_argument("--trades", default=None, help=f"trades ledger CSV; must exist when given (default: ${TRADES_PATH_ENV}, which must also exist, else {DEFAULT_TRADES_PATH}, which may be absent = no trades)")
+    run.add_argument("--holdings", default=None, help="holdings CSV (default: $BIT_POOL_PATH or data/pools/bit_pool.csv under the repo root)")
+    run.add_argument("--trades", default=None, help=f"trades ledger CSV; must exist when given (default: ${TRADES_PATH_ENV}, which must also exist, else data/pools/bit_pool_trades.csv under the repo root, which may be absent = no trades)")
     run.add_argument("--committee", choices=COMMITTEE_CHOICES, default="none", help="analyst committee: none (default), core (5 LLM-free analysts), full (needs --provider and --model), muse (external Muse agent signals)")
     run.add_argument("--provider", default=None, help="LLM provider for the committee (required for full; no default)")
     run.add_argument("--model", default=None, help="LLM model for the committee (required for full; no default)")
