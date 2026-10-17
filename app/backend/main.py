@@ -29,7 +29,7 @@ from src.compliance import enforce_nonloopback_signoff, NonLoopbackServeGuard
 
 enforce_nonloopback_signoff()
 
-app = FastAPI(title="AI Hedge Fund API", description="Backend API for AI Hedge Fund", version="0.1.0")
+app = FastAPI(title="Muse Hedge Lab API", description="Backend API for Muse Hedge Lab", version="0.1.0")
 
 # Dev convenience: create any missing tables. Alembic migrations are the canonical
 # schema source (run `alembic upgrade head`); create_all coexists idempotently.

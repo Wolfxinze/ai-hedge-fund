@@ -21,6 +21,9 @@ _SCANNED_MODULES = ("pipeline", "agents_bridge", "scoring", "classify", "scoring
 # scoring path (pipeline imports it); it mirrors risk_manager's vol math and must
 # NEVER import it back — same I1 boundary, scanned as a second package tuple.
 _SCANNED_QUANT_MODULES = ("volatility",)
+# The bit-pool paper simulator (the owner's real holdings) is research-only and must
+# never reach the trade graph either — same I1 boundary, third package tuple.
+_SCANNED_BIT_POOL_MODULES = ("holdings", "simulate", "report", "cli", "muse_bridge")
 # Direct imports of any of these in the scoring/classification modules would reopen
 # a path to the trade graph. The shared analyst registry (src/utils/analysts.py)
 # imports portfolio_manager, but these modules must not import it DIRECTLY.
@@ -63,19 +66,21 @@ def _forbidden_imports_in(base: pathlib.Path, modules: tuple[str, ...]) -> tuple
 
 
 def _modules_have_no_direct_trade_imports(rec: Recorder) -> bool:
+    import src.bit_pool as bit_pool_pkg
     import src.observing_pools as op_pkg
     import src.quant as quant_pkg
 
     scans = (
         (pathlib.Path(op_pkg.__file__).parent, _SCANNED_MODULES),
         (pathlib.Path(quant_pkg.__file__).parent, _SCANNED_QUANT_MODULES),
+        (pathlib.Path(bit_pool_pkg.__file__).parent, _SCANNED_BIT_POOL_MODULES),
     )
     for base, modules in scans:
         hit = _forbidden_imports_in(base, modules)
         if hit is not None:
             rec.record("ast_imports", module=hit[0], forbidden=hit[1])
             return False
-    rec.record("ast_imports", scanned=len(_SCANNED_MODULES) + len(_SCANNED_QUANT_MODULES))
+    rec.record("ast_imports", scanned=len(_SCANNED_MODULES) + len(_SCANNED_QUANT_MODULES) + len(_SCANNED_BIT_POOL_MODULES))
     return True
 
 

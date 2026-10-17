@@ -1,8 +1,8 @@
 [tool.poetry]
-name = "ai-hedge-fund"
+name = "muse-hedge-lab"
 version = "1.0.0"
-description = "An AI-powered hedge fund that uses multiple agents to make trading decisions"
-authors = ["Your Name <your.email@example.com>"]
+description = "Muse Hedge Lab — multi-agent AI stock research lab (fork of virattt/ai-hedge-fund): observing pools, committee monitoring and bit-pool paper trading. Research only."
+authors = ["Wolfxinze <wolfxinze@users.noreply.github.com>"]
 readme = "README.md"
 packages = [
     { include = "src", from = "." },

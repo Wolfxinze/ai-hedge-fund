@@ -1,12 +1,12 @@
 # Web Application
-The AI Hedge Fund app is a complete system with both frontend and backend components that enables you to run an AI-powered hedge fund trading system through a web interface on your own computer.
+The Muse Hedge Lab app is a complete system with both frontend and backend components that enables you to run an AI-powered investment research lab through a web interface on your own computer.
 
 <img width="1721" alt="Screenshot 2025-06-28 at 6 41 03 PM" src="https://github.com/user-attachments/assets/b95ab696-c9f4-416c-9ad1-51feb1f5374b" />
 
 
 ## Overview
 
-The AI Hedge Fund consists of:
+Muse Hedge Lab consists of:
 
 - **Backend**: A FastAPI application that provides a REST API to run the hedge fund trading system and backtester
 - **Frontend**: A React/Vite application that offers a user-friendly interface to visualize and control the hedge fund operations

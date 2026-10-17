@@ -1,6 +1,6 @@
-# AI Hedge Fund
+# Muse Hedge Lab
 
-This is a proof of concept for an AI-powered hedge fund.  The goal of this project is to explore the use of AI to make trading decisions.  This project is for **educational** purposes only and is not intended for real trading or investment.
+Muse Hedge Lab is a multi-agent AI stock **research** lab maintained by Wolfxinze. It is a fork of [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund), extended with observing pools, committee monitoring, bottleneck research and a daily paper-trading simulation of your own holdings (Bit Pool). This project is for **educational and research** purposes only and is not intended for real trading or investment.
 
 This system employs several agents working together:
 
@@ -27,37 +27,169 @@ This system employs several agents working together:
 
 Note: the system does not actually make any trades.
 
-[![Twitter Follow](https://img.shields.io/twitter/follow/virattt?style=social)](https://twitter.com/virattt)
-
 ## Disclaimer
 
 This project is for **educational and research purposes only**.
 
+- **No order placement.** Muse Hedge Lab never connects to a brokerage and never places, routes or executes orders. Any "trade" it shows is a simulated signal on paper.
+- **This is not investment advice.** Nothing it outputs is a recommendation to buy, sell or hold any security, and no guarantees are provided.
+- **You place any real trades yourself.** The owner decides on, and places, any real trade in their own brokerage account, at their own risk.
 - Not intended for real trading or investment
-- No investment advice or guarantees provided
-- Creator assumes no liability for financial losses
-- Consult a financial advisor for investment decisions
+- The authors and contributors assume no liability for financial losses
+- Consult a licensed financial advisor for investment decisions
 - Past performance does not indicate future results
 
-By using this software, you agree to use it solely for learning purposes.
+By using this software, you agree to use it solely for learning and research purposes.
 
 ## Table of Contents
+- [What Muse Hedge Lab adds](#what-muse-hedge-lab-adds)
+- [Bit Pool — daily paper-trading simulation of your holdings](#bit-pool--daily-paper-trading-simulation-of-your-holdings)
 - [How to Install](#how-to-install)
 - [How to Run](#how-to-run)
   - [⌨️ Command Line Interface](#️-command-line-interface)
   - [🖥️ Web Application](#️-web-application)
 - [How to Contribute](#how-to-contribute)
 - [Feature Requests](#feature-requests)
+- [Acknowledgements](#acknowledgements)
 - [License](#license)
+
+## What Muse Hedge Lab adds
+
+On top of the upstream agents, backtester and web app, this fork adds:
+
+- **Observing Pools** (`src/observing_pools`) — five innovation platforms (Artificial Intelligence, Robotics, Energy Storage, Blockchain Technology, Multiomic Sequencing) with universe classification and a composite ranking per pool.
+- **Monitoring + committee flow** (`src/monitoring`) — runs the analyst committee over a watch list and records the outcome.
+- **Serenity bottleneck research** (`src/serenity`) — evidence gathering and grading for supply-chain bottleneck research.
+- **Scheduler** (`src/scheduler`) — scheduled jobs for the pools and monitors.
+- **Evals and safety rails** (`src/evals`) — eval suites including a no-trade guard and a disclaimer check, plus classification, evidence, injection, scoring and SSRF suites.
+- **Optional local LLM providers** — the agents can run against any supported provider, including local models (for example via Ollama); none is a default.
+- **Bit Pool** (new) — a daily paper-trading simulation of your own holdings; see below.
+
+## Bit Pool — daily paper-trading simulation of your holdings
+
+Bit Pool tracks the holdings you tell it about, marks them to the latest close each day, raises alerts, and (optionally) asks the analyst committee for a view. It is a **paper simulation only**: it never places orders. If you act on anything, you place the trade yourself in your own brokerage and then log the fill in the trades ledger so the simulation keeps tracking your real account.
+
+The persona layer and portfolio manager are an external AI agent called **Muse**, not a local model. Muse's orders are **simulated (paper) only**; real trades are placed only by the owner.
+
+**US-listed equities only.** The intraday guard (16:15 ET) and the `STALE` rule assume the US stock-market session. Non-US listings and crypto tickers are unsupported: their closes would be judged against the wrong session.
+
+### Holdings file
+
+Every `data/pools/*.csv` except `*.example.csv` is gitignored, so your real holdings and ledgers never get committed. Copy the example and edit it:
+
+```bash
+cp data/pools/bit_pool.example.csv data/pools/bit_pool.csv
+```
+
+Header (all five columns are required; the `cost_basis` *value* may be left blank when unknown):
+
+```csv
+ticker,shares,baseline_price,baseline_date,cost_basis
+```
+
+The baseline is the position at the **end of day on `baseline_date`**. A blank `cost_basis` stays unknown: buys do not invent one, unrealized P&L is not shown, and realized P&L on a sell is measured against `baseline_price` and labelled "(vs baseline price — cost unknown)". Every malformed row (missing or extra fields, a non-number, `inf`/`nan`, a bad date or ticker) fails the run with its line number; a file with only a header is an error. UTF-8 with or without a BOM is accepted. A row may leave out the trailing `cost_basis` entirely (4 fields, no trailing comma) and it reads as blank; any other short row is an error.
+
+**Quote numbers that contain commas** (`"1,234.50"`), or write them without the separator (`1234.50`). An unquoted thousands separator splits one number into two fields, which shows up as an extra field and fails the run.
+
+Override the path with the `BIT_POOL_PATH` environment variable or the `--holdings` flag. The default `data/pools/bit_pool.csv` is resolved from the repo root, not the current directory, so a cron job started elsewhere still finds it.
+
+### Trades ledger (optional)
+
+`data/pools/bit_pool_trades.csv` records real fills so the simulation follows the account. `side` is `buy` or `sell`.
+
+```csv
+date,ticker,side,shares,price,note
+```
+
+A row may leave out the trailing `note` entirely (5 fields, no trailing comma). Quote numbers that contain commas here too: unquoted, `2026-10-10,AAPL,buy,10,1,234.50` would read as price `1` with note `234.50`, so a note that is only a number is rejected with `note looks like a number on line N — quote numbers containing commas`.
+
+Path precedence: `--trades` beats the `BIT_POOL_TRADES_PATH` environment variable beats `data/pools/bit_pool_trades.csv` (resolved from the repo root, not the current directory). Only that implicit default may be absent (meaning no trades). A path you name explicitly, with the flag or the environment variable, must exist, or the run exits `1` with `trades ledger not found: <path>`, so a typo cannot silently drop your fills. Trades for a ticker in the holdings file dated **on or before its `baseline_date` are rejected** (they are already in the baseline), and so is a `--date` before any `baseline_date`. Selling more than you hold, including any sell of a ticker you do not hold, is an error. The report shows `Trades applied: N (source)`; the JSON has `trades_source` and `trades_applied`.
+
+### Run it
+
+```bash
+python -m src.bit_pool run [--date YYYY-MM-DD] [--holdings PATH] [--trades PATH] [--committee {none,core,full,muse}] [--provider NAME] [--model NAME] [--muse-signals PATH] [--label NAME] [--out DIR]
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--date` | today (local date) | As-of date to simulate (`YYYY-MM-DD`); a future date exits `1` |
+| `--holdings` | `data/pools/bit_pool.csv` (or `BIT_POOL_PATH`) | Holdings CSV |
+| `--trades` | `BIT_POOL_TRADES_PATH`, else `data/pools/bit_pool_trades.csv` | Trades ledger CSV; must exist when named (only the implicit default may be absent) |
+| `--committee` | `none` | `none` = no analysts; `core` = 5 LLM-free analysts (technical, fundamentals, growth, sentiment, valuation); `full` = all 16 analysts (needs `--provider` and `--model`); `muse` = the Muse agent's signals file |
+| `--provider` | none | LLM provider; required for `full` (there is no default provider) |
+| `--model` | none | LLM model; required for `full` (there is no default model) |
+| `--muse-signals` | `MUSE_SIGNALS_PATH` | For `muse`: a signals file, or a directory of `YYYY-MM-DD.json` files (the newest dated on or before `--date` is used) |
+| `--label` | `real` | Book name (`^[a-z0-9_-]{1,32}$`): `real` = the owner's fills, `muse` = Muse's paper orders |
+| `--out` | `reports/bit_pool` | Output directory |
+
+Outputs `<out>/<date>.json` and `<out>/<date>.md`, both carrying the research-only disclaimer. Each file is rendered in full and then moved into place, so a failed run never leaves a half-written pair. The JSON records `book` (the label), `committee_source` (`core`, `full`, `muse` or null), `committee_signals_as_of`, `prices_as_of`, `partial` and `excluded_tickers`; the markdown title names the book.
+
+**Run after the US close.** Before 16:15 ET the current day's bar is still forming, so it is ignored and the previous close is used. The report always shows which close it used: a `Close date 收盘日` column per position and a `Prices as of 价格日期` line (marked "latest available close; as-of date has no close yet" when it is older than `--date`). If some positions could not be priced, the summary starts with `PARTIAL — excludes X, Y` and the totals cover only the priced positions; if none could be priced the totals are `n/a` (null in JSON), never 0.
+
+The committee table shows each ticker's coverage (valid analysts / committee size, e.g. `4/5`). An analyst whose output was unusable is shown as `neutral (DEGRADED)` (JSON: `{"signal": "neutral", "degraded": true}`) and is left out of the mean score.
+
+### Muse committee and the two books
+
+Muse is a manager/trader agent that runs in a separate Muse account. Each day it reads the Bit Pool reports from a private reports repo and writes two things back into that repo:
+
+- `muse/signals/YYYY-MM-DD.json`: its analyst signals, consumed by `--committee muse`.
+- `muse/orders.csv`: **paper** orders, appended in the same schema as the trades ledger (`date,ticker,side,shares,price,note`). Every order must be dated **after** the holdings' `baseline_date`; an order on or before it is rejected as already included in the baseline.
+
+Signals file schema (analyst keys are the bare committee keys such as `warren_buffett` or `technical_analyst`, with no `_agent` suffix):
+
+```json
+{
+  "as_of": "YYYY-MM-DD",
+  "signals": {
+    "<analyst_key>": {
+      "<TICKER>": {"signal": "bullish|bearish|neutral", "confidence": 0-100, "reasoning": "optional"}
+    }
+  }
+}
+```
+
+A malformed file (bad JSON, unknown analyst, bad ticker, signal or confidence) exits `1`. If no file is dated on or before the run date, the newest one is more than 4 days old, or it has no signals, every committee row is degraded and the run exits `1` (the report is still written). A file dated after the run date exits `1`. A ticker Muse gave no signal for is reported as insufficient evidence (degraded, exit `2`).
+
+The daily run produces two books from the same holdings. The two books **must** use different `--out` directories: the CLI refuses to overwrite a report of a different book (`refusing to overwrite book X with book Y`, exit `1`, nothing written).
+
+```bash
+# Book 1: the owner's actual fills
+python -m src.bit_pool run --label real --committee muse --muse-signals <reports>/muse/signals
+# Book 2: Muse's paper orders
+python -m src.bit_pool run --label muse --trades <reports>/muse/orders.csv --committee muse \
+  --muse-signals <reports>/muse/signals --out reports/bit_pool/muse
+```
+
+Comparing the two books is how the system is verified. Muse's orders are simulated and are never sent to a broker; real trades are placed only by the owner.
+
+### Alert rules
+
+| Condition | Alert |
+|-----------|-------|
+| \|daily move\| >= 5% | `DAILY_MOVE` |
+| vs baseline <= -10% | `BASELINE_WARN` |
+| vs baseline <= -20% | `BASELINE_HEAVY` (replaces `BASELINE_WARN`) |
+| vs baseline >= +20% | `BASELINE_REVIEW` |
+| last close more than 4 days before the latest settled session allowed (`--date`, or earlier when the intraday guard drops it) | `STALE` (counts as degraded: exit `2`) |
+| position's close date differs from the pool's `Prices as of` date | `MIXED_DATE` |
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | ok |
+| `2` | degraded: some (not all) positions or committee tickers could not be priced/scored, or a `STALE` close |
+| `1` | error: bad CSV, oversell, trade on/before `baseline_date`, missing named trades ledger, future `--date`, bad arguments, a different book already in `--out`; also when **every** position or **every** committee ticker is degraded (systemic, e.g. the price provider is down; the report is still written) |
 
 ## How to Install
 
-Before you can run the AI Hedge Fund, you'll need to install it and set up your API keys. These steps are common to both the full-stack web application and command line interface.
+Before you can run Muse Hedge Lab, you'll need to install it and set up your API keys. These steps are common to both the full-stack web application and command line interface.
 
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/virattt/ai-hedge-fund.git
+git clone https://github.com/Wolfxinze/ai-hedge-fund.git
 cd ai-hedge-fund
 ```
 
@@ -90,7 +222,7 @@ FINANCIAL_DATASETS_API_KEY=your-financial-datasets-api-key
 
 ### ⌨️ Command Line Interface
 
-You can run the AI Hedge Fund directly via terminal. This approach offers more granular control and is useful for automation, scripting, and integration purposes.
+You can run Muse Hedge Lab directly via terminal. This approach offers more granular control and is useful for automation, scripting, and integration purposes.
 
 <img width="992" alt="Screenshot 2025-01-06 at 5 50 17 PM" src="https://github.com/user-attachments/assets/e8ca04bf-9989-4a7d-a8b4-34e04666663b" />
 
@@ -106,12 +238,12 @@ curl -sSL https://install.python-poetry.org | python3 -
 poetry install
 ```
 
-#### Run the AI Hedge Fund
+#### Run the agents
 ```bash
 poetry run python src/main.py --ticker AAPL,MSFT,NVDA
 ```
 
-You can also specify a `--ollama` flag to run the AI hedge fund using local LLMs.
+You can also specify a `--ollama` flag to run the agents using local LLMs.
 
 ```bash
 poetry run python src/main.py --ticker AAPL,MSFT,NVDA --ollama
@@ -136,9 +268,9 @@ Note: The `--ollama`, `--start-date`, and `--end-date` flags work for the backte
 
 ### 🖥️ Web Application
 
-The new way to run the AI Hedge Fund is through our web application that provides a user-friendly interface. This is recommended for users who prefer visual interfaces over command line tools.
+The new way to run Muse Hedge Lab is through the web application that provides a user-friendly interface. This is recommended for users who prefer visual interfaces over command line tools.
 
-Please see detailed instructions on how to install and run the web application [here](https://github.com/virattt/ai-hedge-fund/tree/main/app).
+Please see detailed instructions on how to install and run the web application [here](app/README.md).
 
 <img width="1721" alt="Screenshot 2025-06-28 at 6 41 03 PM" src="https://github.com/user-attachments/assets/b95ab696-c9f4-416c-9ad1-51feb1f5374b" />
 
@@ -155,8 +287,12 @@ Please see detailed instructions on how to install and run the web application [
 
 ## Feature Requests
 
-If you have a feature request, please open an [issue](https://github.com/virattt/ai-hedge-fund/issues) and make sure it is tagged with `enhancement`.
+If you have a feature request, please open an [issue](https://github.com/Wolfxinze/ai-hedge-fund/issues) and make sure it is tagged with `enhancement`.
+
+## Acknowledgements
+
+Muse Hedge Lab is built on [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund) by Virat Singh, which provides the original investor agents, backtester and web application. Thank you to the upstream author and contributors.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under the MIT License — see [LICENSE](LICENSE) for details. Copyright (c) 2024 Virat Singh (original ai-hedge-fund) and Copyright (c) 2026 Wolfxinze (Muse Hedge Lab modifications).
