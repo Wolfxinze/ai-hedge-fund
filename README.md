@@ -135,7 +135,9 @@ Outputs `<out>/<date>.json` and `<out>/<date>.md`, both carrying the research-on
 - `初始资本 Initial capital`: `sum(shares * baseline_price)` over the holdings file, before any trade; it stays the same every day.
 - `权益收益 Equity vs initial`: `(equity / initial_capital - 1) * 100`.
 
-The JSON has `initial_capital`, `cash`, `equity` and `equity_vs_initial_pct` (`equity` and `equity_vs_initial_pct` are null when no position could be priced). On a partial pool both equity lines are marked `(PARTIAL)`, because equity then covers only the priced positions plus cash. **Compare books by `equity_vs_initial_pct`**, not by `total_value` or `vs_baseline_pct`, which ignore cash.
+The JSON has `initial_capital`, `cash`, `equity` and `equity_vs_initial_pct` (`equity` and `equity_vs_initial_pct` are null when no position could be priced). On a partial pool both equity lines are marked `(PARTIAL)`, because equity then covers only the priced positions plus cash. On those days `equity_vs_initial_pct` is also null and shows `n/a (PARTIAL)`: initial capital covers every position, so comparing it with an equity that leaves some out would show a loss that is really a missing price. **Compare books by `equity_vs_initial_pct`**, not by `total_value` or `vs_baseline_pct`, which ignore cash.
+
+The positions table has two weight columns. `Weight (positions)` is the position's share of the positions-only total (JSON `weight`). `Weight (equity) 占权益` is its share of equity, positions plus cash (JSON `weight_of_equity`; null when the position is unpriced or equity is zero or negative). `OVER_WEIGHT` uses the equity weight.
 
 The committee table shows each ticker's coverage (valid analysts / committee size, e.g. `4/5`). An analyst whose output was unusable is shown as `neutral (DEGRADED)` (JSON: `{"signal": "neutral", "degraded": true}`) and is left out of the mean score.
 

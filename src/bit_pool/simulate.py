@@ -22,7 +22,9 @@ turns shares into cash. ``initial_capital`` is ``sum(shares * baseline_price)`` 
 the holdings passed in (before any trade; constant across days), ``cash`` is the
 ledger's ``net_cash_flow``, ``equity = total_value + cash`` (None when total_value is
 None) and ``equity_vs_initial_pct`` compares equity to initial capital — the figure to
-compare two books by. ``total_value`` stays positions-only. Policy alerts (never exit
+compare two books by; None on a PARTIAL pool, where equity omits degraded positions
+that initial capital includes. ``total_value`` stays positions-only; each position
+carries ``weight`` (of positions) and ``weight_of_equity``. Policy alerts (never exit
 codes): ``OVER_WEIGHT`` when a priced position exceeds ``max_weight_pct`` of equity
 (strictly greater; off when None), and the pool-level ``NEGATIVE_CASH`` (ticker
 ``POOL_ALERT_TICKER``) when cash < -0.005, i.e. buys outran sell proceeds.
@@ -88,6 +90,7 @@ class PositionSnapshot:
     unrealized_pnl: float | None  # None when cost_basis is unknown (never fabricated)
     alerts: tuple[str, ...]
     degraded_reason: str | None
+    weight_of_equity: float | None = None  # market_value / equity; None if unknown or equity <= 0
 
 
 @dataclass(frozen=True)
@@ -119,7 +122,9 @@ class PoolSnapshot:
 
     @property
     def equity_vs_initial_pct(self) -> float | None:
-        return _pct(self.equity, self.initial_capital)
+        """None on a PARTIAL pool: equity then covers only the priced positions while
+        initial_capital covers all of them, so the ratio would not be comparable."""
+        return None if self.degraded else _pct(self.equity, self.initial_capital)
 
 
 def _pct(now: float | None, then: float | None) -> float | None:
@@ -219,12 +224,13 @@ def _over_weight(market_value: float, equity: float | None, max_weight_pct: floa
 
 
 def _finish(p: PositionSnapshot, total: float | None, prices_as_of: date | None, equity: float | None, max_weight_pct: float | None) -> PositionSnapshot:
-    """Fill weight and the MIXED_DATE / OVER_WEIGHT alerts once pool-level facts are known."""
+    """Fill both weights and the MIXED_DATE / OVER_WEIGHT alerts once pool-level facts are known."""
     if p.degraded_reason is not None:
         return p
     alerts = p.alerts + (("MIXED_DATE",) if p.close_date != prices_as_of else ())
     alerts += ("OVER_WEIGHT",) if _over_weight(p.market_value, equity, max_weight_pct) else ()
-    return replace(p, weight=p.market_value / total if total else None, alerts=alerts)
+    weight_of_equity = p.market_value / equity if equity is not None and equity > 0 else None
+    return replace(p, weight=p.market_value / total if total else None, weight_of_equity=weight_of_equity, alerts=alerts)
 
 
 def _validate_max_weight(max_weight_pct: float | None) -> None:

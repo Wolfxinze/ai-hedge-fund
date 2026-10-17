@@ -10,7 +10,9 @@ Fail-loud rendering: a pool that excludes degraded positions is marked PARTIAL (
 close date behind every number is shown, realized P&L measured against baseline
 price is labelled an estimate, and degraded committee analysts are marked as such.
 Equity (positions + cash) and its return vs the original holdings' capital are shown
-next to the positions-only total; on a PARTIAL pool they are labelled PARTIAL too.
+next to the positions-only total; on a PARTIAL pool they are labelled PARTIAL too and
+the return is n/a (initial capital covers positions the equity cannot price). Each
+position shows its weight of positions and of equity.
 """
 
 from __future__ import annotations
@@ -104,6 +106,15 @@ def _num(value: float | None, fmt: str = ",.2f", none: str = "—") -> str:
     return none if value is None else format(value, fmt)
 
 
+def _cash(value: float) -> str:
+    """Cash with float residue (|x| < half a cent) shown as 0.00, never ``-0.00``."""
+    return _num(0.0 if abs(value) < 0.005 else value)
+
+
+def _weight(value: float | None) -> str:
+    return "—" if value is None else f"{value * 100:,.2f}%"
+
+
 def _pct(value: float | None, none: str = "—") -> str:
     return none if value is None else f"{value:+.2f}%"
 
@@ -118,9 +129,8 @@ def _cell(text: str) -> str:
 
 
 def _position_row(p: PositionSnapshot) -> str:
-    weight = None if p.weight is None else p.weight * 100
     close_date = p.close_date.isoformat() if p.close_date else "—"
-    cells = [p.ticker, _shares(p.shares), _num(p.close), close_date, _pct(p.daily_pct), _num(p.market_value), _num(weight) + ("%" if weight is not None else ""), _pct(p.vs_baseline_pct), ", ".join(p.alerts) or ("DEGRADED" if p.degraded_reason else "")]
+    cells = [p.ticker, _shares(p.shares), _num(p.close), close_date, _pct(p.daily_pct), _num(p.market_value), _weight(p.weight), _weight(p.weight_of_equity), _pct(p.vs_baseline_pct), ", ".join(p.alerts) or ("DEGRADED" if p.degraded_reason else "")]
     return "| " + " | ".join(cells) + " |"
 
 
@@ -135,6 +145,7 @@ def _summary(s: PoolSnapshot, trades_source: str | None, trades_applied: int) ->
     partial = [f"- **PARTIAL — excludes {', '.join(s.degraded)}** (totals cover priced positions only)"] if s.degraded else []
     estimated = " (vs baseline price — cost unknown)" if s.realized_pnl_estimated else ""
     # Equity covers priced positions only when some are degraded; n/a needs no label.
+    # Its return is n/a then (capital covers every position), but still marked PARTIAL.
     partial_eq = " (PARTIAL)" if s.degraded and s.equity is not None else ""
     return [
         "## 持仓总览 Pool summary",
@@ -143,19 +154,19 @@ def _summary(s: PoolSnapshot, trades_source: str | None, trades_applied: int) ->
         _prices_as_of_line(s),
         f"- 总市值 Total value: {_num(s.total_value, none=_NA)}",
         f"- 账户权益 Equity (positions + cash): {_num(s.equity, none=_NA)}{partial_eq}",
-        f"- 现金 Cash: {_num(s.cash)}",
+        f"- 现金 Cash: {_cash(s.cash)}",
         f"- 初始资本 Initial capital: {_num(s.initial_capital, none=_NA)}",
-        f"- 权益收益 Equity vs initial: {_pct(s.equity_vs_initial_pct, none=_NA)}{partial_eq if s.equity_vs_initial_pct is not None else ''}",
+        f"- 权益收益 Equity vs initial: {_pct(s.equity_vs_initial_pct, none=_NA)}{partial_eq}",
         f"- 前一交易日市值 Previous value: {_num(s.prev_total_value, none=_NA)}",
         f"- 日涨跌 Daily change: {_pct(s.daily_pct, none=_NA)}",
         f"- 基准市值 Baseline value: {_num(s.baseline_value, none=_NA)}",
         f"- 相对基准 vs baseline: {_pct(s.vs_baseline_pct, none=_NA)}",
         f"- 已实现盈亏 Realized P&L: {_num(s.realized_pnl)}{estimated}",
-        f"- 净现金流 Net cash flow: {_num(s.net_cash_flow)}",
+        f"- 净现金流 Net cash flow: {_cash(s.net_cash_flow)}",
         f"- 已应用交易 Trades applied: {trades_applied} ({trades_source or 'no ledger'})",
         "",
-        "| Ticker | Shares | Close | Close date 收盘日 | Daily % | Value | Weight | vs Baseline % | Alerts |",
-        "|---|---:|---:|---|---:|---:|---:|---:|---|",
+        "| Ticker | Shares | Close | Close date 收盘日 | Daily % | Value | Weight (positions) | Weight (equity) 占权益 | vs Baseline % | Alerts |",
+        "|---|---:|---:|---|---:|---:|---:|---:|---:|---|",
         *[_position_row(p) for p in s.positions],
         "",
     ]

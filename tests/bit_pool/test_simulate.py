@@ -424,3 +424,40 @@ def test_over_weight_is_measured_against_equity_not_positions_only():
 def test_invalid_max_weight_pct_raises(bad):
     with pytest.raises(ValueError, match="max_weight_pct"):
         _weights_pool(bad)
+
+
+def test_partial_pool_has_equity_but_no_equity_return():
+    # initial_capital covers AAA AND BBB (2000) while equity covers only priced AAA (1100):
+    # the ratio would report a fake -45% loss, so the return is unknown (None) on a PARTIAL day.
+    holdings = (_h("AAA", 10, 100.0), _h("BBB", 5, 200.0))
+    snap = simulate_day(holdings, (), AS_OF, fetch_prices=_fetch_from({"AAA": _flat(110.0), "BBB": RuntimeError("down")}))
+    assert snap.degraded == ("BBB",)
+    assert snap.equity == pytest.approx(1100.0) and snap.initial_capital == pytest.approx(2000.0)
+    assert snap.equity_vs_initial_pct is None
+
+
+def test_weight_of_equity_differs_from_positions_weight_once_cash_exists():
+    holdings = (_h("AAA", 1, 100.0), _h("BBB", 3, 100.0))
+    fetch = _fetch_from({"AAA": _flat(100.0), "BBB": _flat(100.0)})
+    snap = simulate_day(holdings, (Trade(AS_OF, "BBB", "sell", 2, 100.0, ""),), AS_OF, fetch_prices=fetch)
+    by = {p.ticker: p for p in snap.positions}
+    # positions AAA 100 / BBB 100 (50% each); cash 200 → equity 400 (25% each).
+    assert (by["AAA"].weight, by["BBB"].weight) == (pytest.approx(0.5), pytest.approx(0.5))
+    assert (by["AAA"].weight_of_equity, by["BBB"].weight_of_equity) == (pytest.approx(0.25), pytest.approx(0.25))
+
+
+def test_over_weight_agrees_with_weight_of_equity():
+    snap = _weights_pool(74.9)
+    for p in snap.positions:
+        assert ("OVER_WEIGHT" in p.alerts) == (p.weight_of_equity * 100 > 74.9)
+    assert {p.ticker: p.weight_of_equity for p in snap.positions} == {"AAA": pytest.approx(0.25), "BBB": pytest.approx(0.75)}
+
+
+def test_weight_of_equity_is_none_for_degraded_or_non_positive_equity():
+    partial = simulate_day((_h("AAA", 1, 100.0), _h("BBB", 1, 100.0)), (), AS_OF, fetch_prices=_fetch_from({"AAA": _flat(100.0), "BBB": RuntimeError("down")}))
+    assert {p.ticker: p.weight_of_equity for p in partial.positions} == {"AAA": pytest.approx(1.0), "BBB": None}
+    # Buy 2 AAA at 1000 with no cash: positions 300, cash -2000 → equity -1700 (no meaningful share).
+    broke = simulate_day((_h("AAA", 1, 100.0),), (Trade(date(2026, 1, 5), "AAA", "buy", 2, 1000.0, ""),), AS_OF, fetch_prices=_fetch_from({"AAA": _flat(100.0)}), max_weight_pct=50.0)
+    assert broke.equity == pytest.approx(-1700.0)
+    assert broke.positions[0].weight_of_equity is None
+    assert "OVER_WEIGHT" in broke.positions[0].alerts  # deficit book still flags every position
