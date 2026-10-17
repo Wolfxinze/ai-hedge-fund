@@ -8,7 +8,9 @@ degraded, or any STALE close; 1 error (bad CSV, oversell, missing explicit trade
 ledger, future ``--date``, bad arguments) with a message on stderr, and also 1 when
 EVERY position or EVERY committee ticker is degraded (systemic, e.g. provider down —
 the report is still written). Usage errors exit 1 (not argparse's default 2) so 2
-always means "degraded".
+always means "degraded". The policy alerts ``OVER_WEIGHT`` (``--max-weight PCT``: a
+priced position above PCT% of equity) and pool-level ``NEGATIVE_CASH`` (the
+self-funded book's cash below zero) are reported only — they never change the exit code.
 
 Trades ledger: ``--trades`` beats ``$BIT_POOL_TRADES_PATH`` beats
 ``data/pools/bit_pool_trades.csv`` under the repo root (not the CWD, so cron can't
@@ -71,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", default=None, help="LLM model for the committee (required for full; no default)")
     run.add_argument("--muse-signals", default=None, help=f"Muse signals file, or directory of YYYY-MM-DD.json (default: ${MUSE_SIGNALS_ENV})")
     run.add_argument("--label", default=DEFAULT_LABEL, help=f"book name, ^[a-z0-9_-]{{1,32}}$ (default: {DEFAULT_LABEL}); e.g. real = owner's fills, muse = Muse's paper orders")
+    run.add_argument("--max-weight", type=float, default=None, metavar="PCT", help="policy alert OVER_WEIGHT when a priced position exceeds PCT%% of equity (positions + cash), PCT in (0, 100]; default: off. Never changes the exit code")
     run.add_argument("--out", default=DEFAULT_OUT, help=f"output directory (default: {DEFAULT_OUT})")
     return parser
 
@@ -152,6 +155,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError(f"--label {args.label!r} must match {_LABEL_RE.pattern}")
     if args.committee == "full" and not (args.provider and args.model):
         raise ValueError("full committee needs --provider and --model")
+    if args.max_weight is not None and not 0.0 < args.max_weight <= 100.0:  # also rejects nan
+        raise ValueError(f"--max-weight {args.max_weight!r} must be in (0, 100]")
     if args.committee == "muse" and _muse_signals_path(args) is None:
         raise ValueError(f"muse committee needs --muse-signals PATH or ${MUSE_SIGNALS_ENV}")
 
@@ -214,7 +219,7 @@ def _run(args: argparse.Namespace) -> int:
     _guard_book(json_path, args.label)
     holdings = load_holdings(resolve_holdings_path(args.holdings, os.environ))
     trades, trades_source = _load_ledger(args)
-    snapshot = simulate_day(holdings, trades, as_of)
+    snapshot = simulate_day(holdings, trades, as_of, max_weight_pct=args.max_weight)
     committee, signals_as_of = None, None
     tickers = [p.ticker for p in snapshot.positions]
     if args.committee == "muse":

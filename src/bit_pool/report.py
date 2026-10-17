@@ -9,6 +9,8 @@ Fail-loud rendering: a pool that excludes degraded positions is marked PARTIAL (
 ``partial`` / ``excluded_tickers``), unknown totals render ``n/a`` (never 0.00), the
 close date behind every number is shown, realized P&L measured against baseline
 price is labelled an estimate, and degraded committee analysts are marked as such.
+Equity (positions + cash) and its return vs the original holdings' capital are shown
+next to the positions-only total; on a PARTIAL pool they are labelled PARTIAL too.
 """
 
 from __future__ import annotations
@@ -80,6 +82,9 @@ def to_json(
     """
     text, version = _disclaimer()
     body = _jsonable(asdict(snapshot))
+    body["cash"] = snapshot.cash
+    body["equity"] = snapshot.equity
+    body["equity_vs_initial_pct"] = snapshot.equity_vs_initial_pct
     body["book"] = label
     body["partial"] = bool(snapshot.degraded)
     body["excluded_tickers"] = list(snapshot.degraded)
@@ -129,12 +134,18 @@ def _prices_as_of_line(s: PoolSnapshot) -> str:
 def _summary(s: PoolSnapshot, trades_source: str | None, trades_applied: int) -> list[str]:
     partial = [f"- **PARTIAL — excludes {', '.join(s.degraded)}** (totals cover priced positions only)"] if s.degraded else []
     estimated = " (vs baseline price — cost unknown)" if s.realized_pnl_estimated else ""
+    # Equity covers priced positions only when some are degraded; n/a needs no label.
+    partial_eq = " (PARTIAL)" if s.degraded and s.equity is not None else ""
     return [
         "## 持仓总览 Pool summary",
         "",
         *partial,
         _prices_as_of_line(s),
         f"- 总市值 Total value: {_num(s.total_value, none=_NA)}",
+        f"- 账户权益 Equity (positions + cash): {_num(s.equity, none=_NA)}{partial_eq}",
+        f"- 现金 Cash: {_num(s.cash)}",
+        f"- 初始资本 Initial capital: {_num(s.initial_capital, none=_NA)}",
+        f"- 权益收益 Equity vs initial: {_pct(s.equity_vs_initial_pct, none=_NA)}{partial_eq if s.equity_vs_initial_pct is not None else ''}",
         f"- 前一交易日市值 Previous value: {_num(s.prev_total_value, none=_NA)}",
         f"- 日涨跌 Daily change: {_pct(s.daily_pct, none=_NA)}",
         f"- 基准市值 Baseline value: {_num(s.baseline_value, none=_NA)}",

@@ -17,6 +17,16 @@ usable closes, is marked degraded with a reason, excluded from every total and
 weight, and listed in ``PoolSnapshot.degraded`` — never silently valued at zero. When
 every position is degraded the pool totals are ``None``, not 0.0.
 
+Equity: the book is self-funded from the original holdings (no new money), so a sell
+turns shares into cash. ``initial_capital`` is ``sum(shares * baseline_price)`` over
+the holdings passed in (before any trade; constant across days), ``cash`` is the
+ledger's ``net_cash_flow``, ``equity = total_value + cash`` (None when total_value is
+None) and ``equity_vs_initial_pct`` compares equity to initial capital — the figure to
+compare two books by. ``total_value`` stays positions-only. Policy alerts (never exit
+codes): ``OVER_WEIGHT`` when a priced position exceeds ``max_weight_pct`` of equity
+(strictly greater; off when None), and the pool-level ``NEGATIVE_CASH`` (ticker
+``POOL_ALERT_TICKER``) when cash < -0.005, i.e. buys outran sell proceeds.
+
 The default ``fetch_prices`` wraps ``src.tools.api.get_prices`` and imports it
 lazily, so importing this module stays offline.
 """
@@ -38,6 +48,11 @@ BASELINE_WARN_PCT = -10.0
 BASELINE_HEAVY_PCT = -20.0
 BASELINE_REVIEW_PCT = 20.0
 STALE_DAYS = 4
+# Policy alerts. Cash below minus half a cent means buys outran the book's own proceeds.
+NEGATIVE_CASH_TOLERANCE = 0.005
+# Pool-level alerts use this in place of a ticker; it cannot match the ticker whitelist
+# (a real symbol such as POOL could), so it is never mistaken for a position.
+POOL_ALERT_TICKER = "(pool)"
 
 # Calendar-day lookback: covers a long weekend plus a holiday with room to spare.
 _WINDOW_DAYS = 14
@@ -89,7 +104,22 @@ class PoolSnapshot:
     net_cash_flow: float
     prices_as_of: date | None  # most common close date among priced positions
     degraded: tuple[str, ...]
-    alerts: tuple[tuple[str, str], ...]  # (ticker, alert code)
+    alerts: tuple[tuple[str, str], ...]  # (ticker, alert code); pool-level alerts use POOL_ALERT_TICKER
+    initial_capital: float | None = None  # sum(shares*baseline_price) of the ORIGINAL holdings; None = unknown
+
+    @property
+    def cash(self) -> float:
+        """Self-funded book: sell proceeds - buy cost (starts at 0; no new money)."""
+        return self.net_cash_flow
+
+    @property
+    def equity(self) -> float | None:
+        """Positions + cash; None when no position could be priced."""
+        return None if self.total_value is None else self.total_value + self.cash
+
+    @property
+    def equity_vs_initial_pct(self) -> float | None:
+        return _pct(self.equity, self.initial_capital)
 
 
 def _pct(now: float | None, then: float | None) -> float | None:
@@ -176,12 +206,30 @@ def _prices_as_of(live: list[PositionSnapshot]) -> date | None:
     return max(counts, key=lambda d: (counts[d], d)) if counts else None
 
 
-def _finish(p: PositionSnapshot, total: float | None, prices_as_of: date | None) -> PositionSnapshot:
-    """Fill weight and the MIXED_DATE alert once pool-level facts are known."""
+def _over_weight(market_value: float, equity: float | None, max_weight_pct: float | None) -> bool:
+    """market_value / equity * 100 > max_weight_pct, strictly (exactly at the limit is fine).
+
+    Compared as a product so equity <= 0 (cash deficit eating the book) flags every
+    positive position; the relative slack keeps a value exactly at the limit quiet.
+    """
+    if max_weight_pct is None or equity is None:
+        return False
+    limit = max_weight_pct * equity
+    return market_value * 100.0 > limit + abs(limit) * _EPS
+
+
+def _finish(p: PositionSnapshot, total: float | None, prices_as_of: date | None, equity: float | None, max_weight_pct: float | None) -> PositionSnapshot:
+    """Fill weight and the MIXED_DATE / OVER_WEIGHT alerts once pool-level facts are known."""
     if p.degraded_reason is not None:
         return p
     alerts = p.alerts + (("MIXED_DATE",) if p.close_date != prices_as_of else ())
+    alerts += ("OVER_WEIGHT",) if _over_weight(p.market_value, equity, max_weight_pct) else ()
     return replace(p, weight=p.market_value / total if total else None, alerts=alerts)
+
+
+def _validate_max_weight(max_weight_pct: float | None) -> None:
+    if max_weight_pct is not None and not 0.0 < max_weight_pct <= 100.0:  # also rejects NaN
+        raise ValueError(f"max_weight_pct must be in (0, 100], got {max_weight_pct!r}")
 
 
 def simulate_day(
@@ -191,11 +239,15 @@ def simulate_day(
     *,
     fetch_prices: FetchPrices = fetch_prices_via_provider,
     now: datetime | None = None,
+    max_weight_pct: float | None = None,
 ) -> PoolSnapshot:
     """Build the pool snapshot for ``as_of`` (ledger applied first; see module docstring).
 
     ``now`` (default: the current time in ET) drives the intraday guard; inject it in tests.
+    ``max_weight_pct`` in (0, 100] enables ``OVER_WEIGHT`` (None = off); else ValueError.
     """
+    _validate_max_weight(max_weight_pct)
+    initial_capital = sum((h.shares * h.baseline_price for h in holdings), 0.0)
     ledger = apply_trades(holdings, trades, as_of)
     cutoff = _last_complete_day(as_of, now if now is not None else datetime.now(MARKET_TZ))
     marked = [_mark(h, as_of, cutoff, fetch_prices) for h in ledger.holdings]
@@ -207,7 +259,9 @@ def simulate_day(
     prev_total = None if all_degraded else sum((p.shares * p.prev_close for p in live), 0.0)
     baseline_total = None if all_degraded else sum((p.shares * p.baseline_price for p in live), 0.0)
     prices_as_of = _prices_as_of(live)
-    positions = tuple(_finish(p, total, prices_as_of) for p in marked)
+    equity = None if total is None else total + ledger.net_cash_flow
+    positions = tuple(_finish(p, total, prices_as_of, equity, max_weight_pct) for p in marked)
+    pool_alerts = ((POOL_ALERT_TICKER, "NEGATIVE_CASH"),) if ledger.net_cash_flow < -NEGATIVE_CASH_TOLERANCE else ()
     return PoolSnapshot(
         as_of=as_of,
         positions=positions,
@@ -221,5 +275,6 @@ def simulate_day(
         net_cash_flow=ledger.net_cash_flow,
         prices_as_of=prices_as_of,
         degraded=tuple(p.ticker for p in marked if p.degraded_reason is not None),
-        alerts=tuple((p.ticker, a) for p in positions for a in p.alerts),
+        alerts=tuple((p.ticker, a) for p in positions for a in p.alerts) + pool_alerts,
+        initial_capital=initial_capital,
     )

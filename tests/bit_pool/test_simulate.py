@@ -18,6 +18,7 @@ from src.bit_pool.simulate import (
     BASELINE_REVIEW_PCT,
     BASELINE_WARN_PCT,
     DAILY_MOVE_PCT,
+    POOL_ALERT_TICKER,
     STALE_DAYS,
     PoolSnapshot,
     simulate_day,
@@ -306,3 +307,120 @@ def test_unparseable_price_row_degrades_with_reason():
     assert snap.degraded == ("AAA",)
     assert "unparseable price rows" in by["AAA"].degraded_reason
     assert snap.total_value == pytest.approx(55.0)
+
+
+# ── equity = positions + cash, measured against the ORIGINAL holdings' capital ──
+# The Muse book is self-funded from the seeded holdings: a sell turns shares into cash,
+# so a positions-only total would read a sell as a loss. Equity must not move when a
+# position is sold at the very close it is marked to.
+def _flat(close: float = 110.0) -> list[Price]:
+    return [_p(100.0, "2026-01-08"), _p(close, "2026-01-09")]
+
+
+def test_selling_at_the_close_moves_value_to_cash_and_leaves_equity_unchanged():
+    holdings = (_h("AAA", 10, 100.0, cost=100.0),)
+    fetch = _fetch_from({"AAA": _flat(110.0)})
+    before = simulate_day(holdings, (), AS_OF, fetch_prices=fetch)
+    after = simulate_day(holdings, (Trade(AS_OF, "AAA", "sell", 5, 110.0, ""),), AS_OF, fetch_prices=fetch)
+
+    assert (before.total_value, before.cash, before.equity) == (pytest.approx(1100.0), 0.0, pytest.approx(1100.0))
+    assert after.total_value == pytest.approx(550.0)  # positions-only total drops...
+    assert after.cash == pytest.approx(550.0)  # ...by exactly the proceeds now held as cash
+    assert after.equity == pytest.approx(before.equity)  # selling at the close changes nothing
+    assert after.vs_baseline_pct == before.vs_baseline_pct  # existing semantics untouched
+    assert before.initial_capital == after.initial_capital == pytest.approx(1000.0)
+    assert after.equity_vs_initial_pct == pytest.approx(10.0)
+
+
+def test_buy_funded_by_an_earlier_sell_keeps_equity_and_cash_consistent():
+    holdings = (_h("AAA", 10, 100.0), _h("BBB", 5, 200.0))
+    trades = (Trade(date(2026, 1, 5), "AAA", "sell", 4, 110.0, ""), Trade(date(2026, 1, 6), "BBB", "buy", 2, 200.0, ""))
+    fetch = _fetch_from({"AAA": _flat(110.0), "BBB": _flat(210.0)})
+    snap = simulate_day(holdings, trades, AS_OF, fetch_prices=fetch)
+
+    assert snap.total_value == pytest.approx(6 * 110.0 + 7 * 210.0)
+    assert snap.cash == pytest.approx(440.0 - 400.0) == snap.net_cash_flow
+    assert snap.equity == pytest.approx(snap.total_value + snap.cash) == pytest.approx(2170.0)
+    assert snap.equity_vs_initial_pct == pytest.approx((2170.0 / 2000.0 - 1) * 100)
+    assert not any(a == "NEGATIVE_CASH" for _, a in snap.alerts)
+
+
+def test_initial_capital_is_the_original_holdings_and_constant_across_trades():
+    holdings = (_h("AAA", 10, 100.0), _h("BBB", 5, 200.0))
+    fetch = _fetch_from({"AAA": _flat(), "BBB": _flat(), "NEW": _flat()})
+    untouched = simulate_day(holdings, (), AS_OF, fetch_prices=fetch)
+    # Sell AAA out entirely, then open a new ticker with the proceeds: neither changes capital.
+    trades = (Trade(date(2026, 1, 5), "AAA", "sell", 10, 120.0, ""), Trade(date(2026, 1, 6), "NEW", "buy", 5, 100.0, ""))
+    traded = simulate_day(holdings, trades, AS_OF, fetch_prices=fetch)
+    assert untouched.initial_capital == traded.initial_capital == pytest.approx(10 * 100.0 + 5 * 200.0)
+    assert [p.ticker for p in traded.positions] == ["BBB", "NEW"]
+
+
+def test_buy_without_funds_raises_negative_cash_pool_alert():
+    holdings = (_h("AAA", 10, 100.0),)
+    fetch = _fetch_from({"AAA": _flat()})
+    snap = simulate_day(holdings, (Trade(date(2026, 1, 5), "AAA", "buy", 1, 100.0, ""),), AS_OF, fetch_prices=fetch)
+    assert snap.cash == pytest.approx(-100.0)
+    assert (POOL_ALERT_TICKER, "NEGATIVE_CASH") in snap.alerts
+    assert POOL_ALERT_TICKER == "(pool)"  # cannot collide with a real ticker such as POOL
+
+
+def test_negative_cash_ignores_sub_half_cent_rounding():
+    holdings = (_h("AAA", 10, 100.0),)
+    fetch = _fetch_from({"AAA": _flat()})
+    snap = simulate_day(holdings, (Trade(date(2026, 1, 5), "AAA", "buy", 1, 0.004, ""),), AS_OF, fetch_prices=fetch)
+    assert snap.cash == pytest.approx(-0.004)
+    assert not any(a == "NEGATIVE_CASH" for _, a in snap.alerts)
+
+
+def test_negative_cash_fires_even_when_every_position_is_degraded():
+    holdings = (_h("AAA", 10, 100.0),)
+    fetch = _fetch_from({"AAA": RuntimeError("down")})
+    snap = simulate_day(holdings, (Trade(date(2026, 1, 5), "AAA", "buy", 1, 100.0, ""),), AS_OF, fetch_prices=fetch)
+    assert (snap.equity, snap.equity_vs_initial_pct) == (None, None)
+    assert snap.cash == pytest.approx(-100.0) and snap.initial_capital == pytest.approx(1000.0)
+    assert (POOL_ALERT_TICKER, "NEGATIVE_CASH") in snap.alerts
+
+
+def test_all_degraded_pool_has_no_equity():
+    snap = simulate_day((_h("AAA", 1, 100.0),), (), AS_OF, fetch_prices=_fetch_from({"AAA": RuntimeError("down")}))
+    assert (snap.total_value, snap.equity, snap.equity_vs_initial_pct) == (None, None, None)
+    assert snap.cash == 0.0
+
+
+def _weights_pool(max_weight_pct):
+    # AAA 100 / BBB 300 → weights of equity 25% / 75%.
+    holdings = (_h("AAA", 1, 100.0), _h("BBB", 3, 100.0))
+    fetch = _fetch_from({"AAA": _flat(100.0), "BBB": _flat(100.0)})
+    return simulate_day(holdings, (), AS_OF, fetch_prices=fetch, max_weight_pct=max_weight_pct)
+
+
+def _over(snap):
+    return [t for t, a in snap.alerts if a == "OVER_WEIGHT"]
+
+
+def test_over_weight_fires_above_the_limit_not_at_it():
+    assert _over(_weights_pool(75.0)) == []  # BBB is exactly 75% → no alert
+    assert _over(_weights_pool(74.9)) == ["BBB"]
+    assert _over(_weights_pool(24.9)) == ["AAA", "BBB"]
+    assert "OVER_WEIGHT" in next(p for p in _weights_pool(74.9).positions if p.ticker == "BBB").alerts
+
+
+def test_over_weight_is_off_without_a_limit():
+    assert _over(_weights_pool(None)) == []
+
+
+def test_over_weight_is_measured_against_equity_not_positions_only():
+    # Sell 2 BBB at the close: positions AAA 100 / BBB 100 (50% each of positions), cash 200,
+    # equity 400 → 25% each of equity. A 30% limit must not fire.
+    holdings = (_h("AAA", 1, 100.0), _h("BBB", 3, 100.0))
+    fetch = _fetch_from({"AAA": _flat(100.0), "BBB": _flat(100.0)})
+    snap = simulate_day(holdings, (Trade(AS_OF, "BBB", "sell", 2, 100.0, ""),), AS_OF, fetch_prices=fetch, max_weight_pct=30.0)
+    assert snap.equity == pytest.approx(400.0)
+    assert _over(snap) == []
+
+
+@pytest.mark.parametrize("bad", [0.0, -5.0, 101.0, float("nan"), float("inf")])
+def test_invalid_max_weight_pct_raises(bad):
+    with pytest.raises(ValueError, match="max_weight_pct"):
+        _weights_pool(bad)

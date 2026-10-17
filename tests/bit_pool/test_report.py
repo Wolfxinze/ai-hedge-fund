@@ -204,3 +204,44 @@ def test_cell_escapes_pipes_and_newlines():
     md = render_markdown(_snap(_pos()), bad)
     row = next(ln for ln in md.splitlines() if ln.startswith("| AAA |") and "DEGRADED" in ln)
     assert "second line" in row  # still one table row
+
+
+# ── equity / cash / initial capital (comparing books needs equity, not positions-only) ──
+def test_json_carries_equity_cash_and_initial_capital():
+    out = json.loads(json.dumps(to_json(_snap(_pos(), initial_capital=1000.0)), allow_nan=False))
+    # _snap: total_value 1050 + net_cash_flow -40 → equity 1010
+    assert out["cash"] == pytest.approx(-40.0)
+    assert out["equity"] == pytest.approx(1010.0)
+    assert out["initial_capital"] == pytest.approx(1000.0)
+    assert out["equity_vs_initial_pct"] == pytest.approx(1.0)
+    assert out["total_value"] == pytest.approx(1050.0)  # positions-only, unchanged
+
+
+def test_markdown_equity_lines_follow_total_value_in_order():
+    lines = [ln for ln in _summary_lines(render_markdown(_snap(_pos(), initial_capital=1000.0))) if ln.startswith("- ")]
+    i = next(n for n, ln in enumerate(lines) if "Total value" in ln)
+    assert lines[i + 1 : i + 5] == [
+        "- 账户权益 Equity (positions + cash): 1,010.00",
+        "- 现金 Cash: -40.00",
+        "- 初始资本 Initial capital: 1,000.00",
+        "- 权益收益 Equity vs initial: +1.00%",
+    ]
+
+
+def test_partial_pool_labels_equity_partial():
+    snap = _snap(_pos(), _pos("BBB", degraded_reason="down"), initial_capital=1000.0)
+    summary = _summary_lines(render_markdown(snap))
+    equity = next(ln for ln in summary if "Equity (positions + cash)" in ln)
+    pct = next(ln for ln in summary if "Equity vs initial" in ln)
+    assert equity == "- 账户权益 Equity (positions + cash): 1,010.00 (PARTIAL)"
+    assert pct == "- 权益收益 Equity vs initial: +1.00% (PARTIAL)"
+    assert "(PARTIAL)" not in render_markdown(_snap(_pos(), initial_capital=1000.0))
+
+
+def test_all_degraded_pool_renders_equity_na():
+    snap = _snap(_pos("BBB", degraded_reason="down"), total_value=None, prev_total_value=None, baseline_value=None, daily_pct=None, vs_baseline_pct=None, prices_as_of=None, initial_capital=1000.0)
+    out = json.loads(json.dumps(to_json(snap), allow_nan=False))
+    assert (out["equity"], out["equity_vs_initial_pct"], out["cash"]) == (None, None, -40.0)
+    summary = _summary_lines(render_markdown(snap))
+    for label in ("Equity (positions + cash)", "Equity vs initial"):
+        assert next(ln for ln in summary if label in ln).endswith(": n/a")
