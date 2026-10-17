@@ -1,0 +1,4 @@
+ticker,shares,baseline_price,baseline_date,cost_basis
+AAPL,10,100.00,2026-01-02,95.00
+MSFT,5,300.00,2026-01-02,
+NVDA,20,50.00,2026-01-02,40.00

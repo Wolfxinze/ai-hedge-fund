@@ -68,3 +68,8 @@ evals_runs/
 
 # Alembic (keep migration files, but ignore generated/cache files)
 app/backend/alembic/versions/__pycache__/
+
+# Bit pool: the owner's REAL holdings/trades and generated reports (repo is public — never commit)
+data/pools/bit_pool.csv
+data/pools/bit_pool_trades.csv
+reports/
