@@ -599,3 +599,42 @@ def test_tiny_sell_of_unheld_ticker_exits_1(tmp_path, prices, capsys):
     assert code == 1
     err = capsys.readouterr().err
     assert "oversell" in err and "ZZZ" in err
+
+
+# ── equity policy alerts: --max-weight / OVER_WEIGHT and NEGATIVE_CASH (never exit codes) ──
+def test_max_weight_defaults_to_off(tmp_path, prices):
+    assert cli.build_parser().parse_args(["run"]).max_weight is None
+    code, out = _run(tmp_path)
+    assert code == 0
+    assert not any(a["alert"] == "OVER_WEIGHT" for a in _json(out)["alerts"])
+
+
+def test_max_weight_flags_over_weight_without_changing_exit_code(tmp_path, prices):
+    # AAA 10*101=1010, BBB 5*101=505 → equity 1515; AAA 66.7%, BBB 33.3%.
+    code, out = _run(tmp_path, "--max-weight", "50")
+    assert code == 0  # policy alert only
+    data = _json(out)
+    assert [a["ticker"] for a in data["alerts"] if a["alert"] == "OVER_WEIGHT"] == ["AAA"]
+    assert data["equity"] == pytest.approx(1515.0) and data["cash"] == 0.0
+    assert data["initial_capital"] == pytest.approx(10 * 100.0 + 5 * 50.0)
+    assert "AAA: OVER_WEIGHT" in (out / "2026-01-09.md").read_text(encoding="utf-8")
+
+
+def test_unfunded_buy_raises_negative_cash_without_changing_exit_code(tmp_path, prices):
+    out = tmp_path / "out"
+    ledger = _ledger(tmp_path, "2026-01-05,AAA,buy,1,100,\n")
+    code = cli.main(["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path)), "--trades", str(ledger), "--out", str(out)])
+    assert code == 0
+    data = _json(out)
+    assert {"ticker": "(pool)", "alert": "NEGATIVE_CASH"} in data["alerts"]
+    assert data["cash"] == pytest.approx(-100.0)
+    assert "- (pool): NEGATIVE_CASH" in (out / "2026-01-09.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "101", "abc", "nan"])
+def test_invalid_max_weight_exits_1(tmp_path, prices, capsys, bad):
+    code, out = _run(tmp_path, "--max-weight", bad)
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "max-weight" in err and "unrecognized" not in err  # rejected as a bad value, not an unknown flag
+    assert not out.exists()

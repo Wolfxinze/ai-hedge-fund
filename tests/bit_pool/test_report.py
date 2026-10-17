@@ -20,7 +20,8 @@ DISCLAIMER, VERSION = research_disclaimer()
 def _pos(ticker="AAA", alerts=("DAILY_MOVE",), degraded_reason=None) -> PositionSnapshot:
     if degraded_reason:
         return PositionSnapshot(ticker, 3.0, None, None, None, None, None, None, 100.0, None, None, None, (), degraded_reason)
-    return PositionSnapshot(ticker, 10.0, 105.0, 100.0, date(2026, 1, 9), 5.0, 1050.0, 1.0, 100.0, 5.0, 90.0, 150.0, alerts, None)
+    # weight_of_equity: market value 1050 / equity 1010 (_snap: total 1050 + cash -40).
+    return PositionSnapshot(ticker, 10.0, 105.0, 100.0, date(2026, 1, 9), 5.0, 1050.0, 1.0, 100.0, 5.0, 90.0, 150.0, alerts, None, weight_of_equity=1050.0 / 1010.0)
 
 
 def _snap(*positions, **over) -> PoolSnapshot:
@@ -204,3 +205,84 @@ def test_cell_escapes_pipes_and_newlines():
     md = render_markdown(_snap(_pos()), bad)
     row = next(ln for ln in md.splitlines() if ln.startswith("| AAA |") and "DEGRADED" in ln)
     assert "second line" in row  # still one table row
+
+
+# ── equity / cash / initial capital (comparing books needs equity, not positions-only) ──
+def test_json_carries_equity_cash_and_initial_capital():
+    out = json.loads(json.dumps(to_json(_snap(_pos(), initial_capital=1000.0)), allow_nan=False))
+    # _snap: total_value 1050 + net_cash_flow -40 → equity 1010
+    assert out["cash"] == pytest.approx(-40.0)
+    assert out["equity"] == pytest.approx(1010.0)
+    assert out["initial_capital"] == pytest.approx(1000.0)
+    assert out["equity_vs_initial_pct"] == pytest.approx(1.0)
+    assert out["total_value"] == pytest.approx(1050.0)  # positions-only, unchanged
+
+
+def test_markdown_equity_lines_follow_total_value_in_order():
+    lines = [ln for ln in _summary_lines(render_markdown(_snap(_pos(), initial_capital=1000.0))) if ln.startswith("- ")]
+    i = next(n for n, ln in enumerate(lines) if "Total value" in ln)
+    assert lines[i + 1 : i + 5] == [
+        "- 账户权益 Equity (positions + cash): 1,010.00",
+        "- 现金 Cash: -40.00",
+        "- 初始资本 Initial capital: 1,000.00",
+        "- 权益收益 Equity vs initial: +1.00%",
+    ]
+
+
+def test_partial_pool_labels_equity_partial_and_has_no_equity_return():
+    # Realistic capital covers EVERY original position: AAA 10*100 + BBB 3*100 = 1300.
+    # Equity (1010) covers only priced AAA plus cash, so 1010 vs 1300 would read as a
+    # -22% loss that is really just BBB's missing price — the % must be n/a, not a number.
+    snap = _snap(_pos(), _pos("BBB", degraded_reason="down"), initial_capital=1300.0)
+    out = json.loads(json.dumps(to_json(snap), allow_nan=False))
+    assert out["equity"] == pytest.approx(1010.0)  # equity itself is still reported...
+    assert out["equity_vs_initial_pct"] is None  # ...but its return vs all-positions capital is not
+    summary = _summary_lines(render_markdown(snap))
+    equity = next(ln for ln in summary if "Equity (positions + cash)" in ln)
+    pct = next(ln for ln in summary if "Equity vs initial" in ln)
+    assert equity == "- 账户权益 Equity (positions + cash): 1,010.00 (PARTIAL)"
+    assert pct == "- 权益收益 Equity vs initial: n/a (PARTIAL)"
+    assert "(PARTIAL)" not in render_markdown(_snap(_pos(), initial_capital=1000.0))
+
+
+def test_all_degraded_pool_renders_equity_na():
+    snap = _snap(_pos("BBB", degraded_reason="down"), total_value=None, prev_total_value=None, baseline_value=None, daily_pct=None, vs_baseline_pct=None, prices_as_of=None, initial_capital=1000.0)
+    out = json.loads(json.dumps(to_json(snap), allow_nan=False))
+    assert (out["equity"], out["equity_vs_initial_pct"], out["cash"]) == (None, None, -40.0)
+    summary = _summary_lines(render_markdown(snap))
+    for label in ("Equity (positions + cash)", "Equity vs initial"):
+        assert next(ln for ln in summary if label in ln).endswith(": n/a")
+
+
+# ── two weights: share of positions vs share of equity (OVER_WEIGHT uses the latter) ──
+def test_json_carries_weight_of_equity_per_position():
+    out = json.loads(json.dumps(to_json(_snap()), allow_nan=False))
+    by = {p["ticker"]: p for p in out["positions"]}
+    assert by["AAA"]["weight"] == pytest.approx(1.0)
+    assert by["AAA"]["weight_of_equity"] == pytest.approx(1050.0 / 1010.0)
+    assert by["BBB"]["weight_of_equity"] is None  # degraded: never a fake 0
+
+
+def test_markdown_positions_table_shows_both_weight_columns():
+    md = render_markdown(_snap())
+    header = next(ln for ln in md.splitlines() if ln.startswith("| Ticker | Shares |"))
+    cols = [c.strip() for c in header.strip("|").split("|")]
+    i = cols.index("Weight (positions)")
+    assert cols[i + 1] == "Weight (equity) 占权益"
+    assert "Weight" not in cols  # the ambiguous bare label is gone
+    aaa = [c.strip() for c in next(ln for ln in md.splitlines() if ln.startswith("| AAA |")).strip("|").split("|")]
+    bbb = [c.strip() for c in next(ln for ln in md.splitlines() if ln.startswith("| BBB |")).strip("|").split("|")]
+    assert len(aaa) == len(cols) == len(bbb)
+    assert (aaa[i], aaa[i + 1]) == ("100.00%", "103.96%")
+    assert (bbb[i], bbb[i + 1]) == ("—", "—")
+
+
+def test_cash_float_residue_never_renders_negative_zero():
+    residue = 0.3 - (0.1 + 0.2)  # -5.55e-17: a sell/buy round trip that nets to nothing
+    assert residue < 0
+    md = render_markdown(_snap(_pos(), net_cash_flow=residue))
+    summary = _summary_lines(md)
+    assert "- 现金 Cash: 0.00" in summary
+    assert "- 净现金流 Net cash flow: 0.00" in summary
+    assert "-0.00" not in md
+    assert "- 现金 Cash: -40.00" in _summary_lines(render_markdown(_snap(_pos())))  # real negatives keep their sign

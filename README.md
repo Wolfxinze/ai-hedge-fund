@@ -108,7 +108,7 @@ Path precedence: `--trades` beats the `BIT_POOL_TRADES_PATH` environment variabl
 ### Run it
 
 ```bash
-python -m src.bit_pool run [--date YYYY-MM-DD] [--holdings PATH] [--trades PATH] [--committee {none,core,full,muse}] [--provider NAME] [--model NAME] [--muse-signals PATH] [--label NAME] [--out DIR]
+python -m src.bit_pool run [--date YYYY-MM-DD] [--holdings PATH] [--trades PATH] [--committee {none,core,full,muse}] [--provider NAME] [--model NAME] [--muse-signals PATH] [--label NAME] [--max-weight PCT] [--out DIR]
 ```
 
 | Flag | Default | Meaning |
@@ -121,11 +121,23 @@ python -m src.bit_pool run [--date YYYY-MM-DD] [--holdings PATH] [--trades PATH]
 | `--model` | none | LLM model; required for `full` (there is no default model) |
 | `--muse-signals` | `MUSE_SIGNALS_PATH` | For `muse`: a signals file, or a directory of `YYYY-MM-DD.json` files (the newest dated on or before `--date` is used) |
 | `--label` | `real` | Book name (`^[a-z0-9_-]{1,32}$`): `real` = the owner's fills, `muse` = Muse's paper orders |
+| `--max-weight` | off | Policy alert `OVER_WEIGHT` when a priced position is more than `PCT`% of equity; `PCT` must be in (0, 100], anything else (0, -5, 101, `abc`) exits `1` |
 | `--out` | `reports/bit_pool` | Output directory |
 
 Outputs `<out>/<date>.json` and `<out>/<date>.md`, both carrying the research-only disclaimer. Each file is rendered in full and then moved into place, so a failed run never leaves a half-written pair. The JSON records `book` (the label), `committee_source` (`core`, `full`, `muse` or null), `committee_signals_as_of`, `prices_as_of`, `partial` and `excluded_tickers`; the markdown title names the book.
 
 **Run after the US close.** Before 16:15 ET the current day's bar is still forming, so it is ignored and the previous close is used. The report always shows which close it used: a `Close date 收盘日` column per position and a `Prices as of 价格日期` line (marked "latest available close; as-of date has no close yet" when it is older than `--date`). If some positions could not be priced, the summary starts with `PARTIAL — excludes X, Y` and the totals cover only the priced positions; if none could be priced the totals are `n/a` (null in JSON), never 0.
+
+**Equity, cash and initial capital.** A book is self-funded from the holdings it starts with: no new money is added, and a sell turns shares into cash. `Total value 总市值` counts positions only, so on its own a sell would look like a loss. The summary therefore also shows, right after it:
+
+- `账户权益 Equity (positions + cash)`: `equity = total_value + cash`; selling at the close leaves it unchanged.
+- `现金 Cash`: sell proceeds minus buy cost (the ledger's net cash flow), starting at 0.
+- `初始资本 Initial capital`: `sum(shares * baseline_price)` over the holdings file, before any trade; it stays the same every day.
+- `权益收益 Equity vs initial`: `(equity / initial_capital - 1) * 100`.
+
+The JSON has `initial_capital`, `cash`, `equity` and `equity_vs_initial_pct` (`equity` and `equity_vs_initial_pct` are null when no position could be priced). On a partial pool both equity lines are marked `(PARTIAL)`, because equity then covers only the priced positions plus cash. On those days `equity_vs_initial_pct` is also null and shows `n/a (PARTIAL)`: initial capital covers every position, so comparing it with an equity that leaves some out would show a loss that is really a missing price. **Compare books by `equity_vs_initial_pct`**, not by `total_value` or `vs_baseline_pct`, which ignore cash.
+
+The positions table has two weight columns. `Weight (positions)` is the position's share of the positions-only total (JSON `weight`). `Weight (equity) 占权益` is its share of equity, positions plus cash (JSON `weight_of_equity`; null when the position is unpriced or equity is zero or negative). `OVER_WEIGHT` uses the equity weight.
 
 The committee table shows each ticker's coverage (valid analysts / committee size, e.g. `4/5`). An analyst whose output was unusable is shown as `neutral (DEGRADED)` (JSON: `{"signal": "neutral", "degraded": true}`) and is left out of the mean score.
 
@@ -173,6 +185,8 @@ Comparing the two books is how the system is verified. Muse's orders are simulat
 | vs baseline >= +20% | `BASELINE_REVIEW` |
 | last close more than 4 days before the latest settled session allowed (`--date`, or earlier when the intraday guard drops it) | `STALE` (counts as degraded: exit `2`) |
 | position's close date differs from the pool's `Prices as of` date | `MIXED_DATE` |
+| `--max-weight PCT` given and the position's market value is more than `PCT`% of equity (exactly `PCT`% does not fire) | `OVER_WEIGHT` (policy alert; does not change the exit code) |
+| cash below -0.005 (buys spent more than the book's own sell proceeds; the self-funding limit is breached) | `NEGATIVE_CASH`, a pool-level alert reported with ticker `(pool)` (policy alert; does not change the exit code) |
 
 ### Exit codes
 
