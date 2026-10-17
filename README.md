@@ -73,17 +73,19 @@ The persona layer and portfolio manager are an external AI agent called **Muse**
 
 ### Holdings file
 
-`data/pools/bit_pool.csv` is gitignored so your real holdings never get committed. Copy the example and edit it:
+Every `data/pools/*.csv` except `*.example.csv` is gitignored, so your real holdings and ledgers never get committed. Copy the example and edit it:
 
 ```bash
 cp data/pools/bit_pool.example.csv data/pools/bit_pool.csv
 ```
 
-Header (`cost_basis` is optional):
+Header (all five columns are required; the `cost_basis` *value* may be left blank when unknown):
 
 ```csv
 ticker,shares,baseline_price,baseline_date,cost_basis
 ```
+
+The baseline is the position at the **end of day on `baseline_date`**. A blank `cost_basis` stays unknown: buys do not invent one, unrealized P&L is not shown, and realized P&L on a sell is measured against `baseline_price` and labelled "(vs baseline price — cost unknown)". Every malformed row (missing or extra fields, a non-number, `inf`/`nan`, a bad date or ticker) fails the run with its line number; a file with only a header is an error. UTF-8 with or without a BOM is accepted.
 
 Override the path with the `BIT_POOL_PATH` environment variable or the `--holdings` flag.
 
@@ -95,6 +97,8 @@ Override the path with the `BIT_POOL_PATH` environment variable or the `--holdin
 date,ticker,side,shares,price,note
 ```
 
+Path precedence: `--trades` beats the `BIT_POOL_TRADES_PATH` environment variable beats `data/pools/bit_pool_trades.csv`. Only that implicit default may be absent (meaning no trades). A path you name explicitly, with the flag or the environment variable, must exist, or the run exits `1` with `trades ledger not found: <path>`, so a typo cannot silently drop your fills. Trades for a ticker in the holdings file dated **on or before its `baseline_date` are rejected** (they are already in the baseline), and so is a `--date` before any `baseline_date`. Selling more than you hold, including any sell of a ticker you do not hold, is an error. The report shows `Trades applied: N (source)`; the JSON has `trades_source` and `trades_applied`.
+
 ### Run it
 
 ```bash
@@ -103,9 +107,9 @@ python -m src.bit_pool run [--date YYYY-MM-DD] [--holdings PATH] [--trades PATH]
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--date` | — | As-of date to simulate (`YYYY-MM-DD`) |
+| `--date` | today (local date) | As-of date to simulate (`YYYY-MM-DD`); a future date exits `1` |
 | `--holdings` | `data/pools/bit_pool.csv` (or `BIT_POOL_PATH`) | Holdings CSV |
-| `--trades` | `data/pools/bit_pool_trades.csv` | Optional trades ledger CSV |
+| `--trades` | `BIT_POOL_TRADES_PATH`, else `data/pools/bit_pool_trades.csv` | Trades ledger CSV; must exist when named (only the implicit default may be absent) |
 | `--committee` | `none` | `none` = no analysts; `core` = 5 LLM-free analysts (technical, fundamentals, growth, sentiment, valuation); `full` = all 16 analysts (needs `--provider` and `--model`); `muse` = the Muse agent's signals file |
 | `--provider` | none | LLM provider; required for `full` (there is no default provider) |
 | `--model` | none | LLM model; required for `full` (there is no default model) |
@@ -113,7 +117,11 @@ python -m src.bit_pool run [--date YYYY-MM-DD] [--holdings PATH] [--trades PATH]
 | `--label` | `real` | Book name (`^[a-z0-9_-]{1,32}$`): `real` = the owner's fills, `muse` = Muse's paper orders |
 | `--out` | `reports/bit_pool` | Output directory |
 
-Outputs `<out>/<date>.json` and `<out>/<date>.md`, both carrying the research-only disclaimer. The JSON records `book` (the label), `committee_source` (`core`, `full`, `muse` or null) and `committee_signals_as_of`; the markdown title names the book.
+Outputs `<out>/<date>.json` and `<out>/<date>.md`, both carrying the research-only disclaimer. Each file is rendered in full and then moved into place, so a failed run never leaves a half-written pair. The JSON records `book` (the label), `committee_source` (`core`, `full`, `muse` or null), `committee_signals_as_of`, `prices_as_of`, `partial` and `excluded_tickers`; the markdown title names the book.
+
+**Run after the US close.** Before 16:15 ET the current day's bar is still forming, so it is ignored and the previous close is used. The report always shows which close it used: a `Close date 收盘日` column per position and a `Prices as of 价格日期` line (marked "latest available close; as-of date has no close yet" when it is older than `--date`). If some positions could not be priced, the summary starts with `PARTIAL — excludes X, Y` and the totals cover only the priced positions; if none could be priced the totals are `n/a` (null in JSON), never 0.
+
+The committee table shows each ticker's coverage (valid analysts / committee size, e.g. `4/5`). An analyst whose output was unusable is shown as `neutral (DEGRADED)` (JSON: `{"signal": "neutral", "degraded": true}`) and is left out of the mean score.
 
 ### Muse committee and the two books
 
@@ -135,9 +143,9 @@ Signals file schema (analyst keys are the bare committee keys such as `warren_bu
 }
 ```
 
-A malformed file (bad JSON, unknown analyst, bad ticker, signal or confidence) exits `1`. If no file is dated on or before the run date, or the newest one is more than 4 days old, every committee row is degraded (exit `2`). A file dated after the run date exits `1`. A ticker Muse gave no signal for is reported as insufficient evidence (degraded).
+A malformed file (bad JSON, unknown analyst, bad ticker, signal or confidence) exits `1`. If no file is dated on or before the run date, the newest one is more than 4 days old, or it has no signals, every committee row is degraded and the run exits `1` (the report is still written). A file dated after the run date exits `1`. A ticker Muse gave no signal for is reported as insufficient evidence (degraded, exit `2`).
 
-The daily run produces two books from the same holdings. Use a separate `--out` per book so the reports do not overwrite each other:
+The daily run produces two books from the same holdings. The two books **must** use different `--out` directories: the CLI refuses to overwrite a report of a different book (`refusing to overwrite book X with book Y`, exit `1`, nothing written).
 
 ```bash
 # Book 1: the owner's actual fills
@@ -153,19 +161,20 @@ Comparing the two books is how the system is verified. Muse's orders are simulat
 
 | Condition | Alert |
 |-----------|-------|
-| \|daily move\| >= 5% | Large daily move |
-| vs baseline <= -10% | Warn |
-| vs baseline <= -20% | Heavy warn |
-| vs baseline >= +20% | Review |
-| last close more than 4 days old | `STALE` |
+| \|daily move\| >= 5% | `DAILY_MOVE` |
+| vs baseline <= -10% | `BASELINE_WARN` |
+| vs baseline <= -20% | `BASELINE_HEAVY` (replaces `BASELINE_WARN`) |
+| vs baseline >= +20% | `BASELINE_REVIEW` |
+| last close more than 4 days before `--date` | `STALE` (counts as degraded: exit `2`) |
+| position's close date differs from the pool's `Prices as of` date | `MIXED_DATE` |
 
 ### Exit codes
 
 | Code | Meaning |
 |------|---------|
 | `0` | ok |
-| `2` | degraded (for example, a price fetch failed) |
-| `1` | error |
+| `2` | degraded: some (not all) positions or committee tickers could not be priced/scored, or a `STALE` close |
+| `1` | error: bad CSV, oversell, trade on/before `baseline_date`, missing named trades ledger, future `--date`, bad arguments, a different book already in `--out`; also when **every** position or **every** committee ticker is degraded (systemic, e.g. the price provider is down; the report is still written) |
 
 ## How to Install
 

@@ -2,12 +2,13 @@
 
 Every number here is hand-computable from the fixture, so a formula change (e.g.
 weights over degraded positions, pool daily % from closes instead of prev closes)
-turns a test RED. Alert boundaries are pinned on BOTH sides: a threshold that drifts
-by a hair, or flips ``>=`` to ``>``, fails here. Price fetch is always injected —
-no network.
+turns a test RED. Alert boundaries are pinned with values on each side of every
+threshold (e.g. a 5.00% move fires, 4.999% does not). Price fetch and the clock are
+always injected — no network.
 """
 
-from datetime import date
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -24,6 +25,7 @@ from src.bit_pool.simulate import (
 from src.data.models import Price
 
 AS_OF = date(2026, 1, 9)  # a Friday
+ET = ZoneInfo("America/New_York")
 
 
 def _p(close: float, time: str) -> Price:
@@ -102,7 +104,7 @@ def test_datetime_style_time_strings_are_accepted():
 
 
 # ── alert boundaries ──
-@pytest.mark.parametrize("close,fires", [(105.0, True), (95.0, True), (104.99, False), (95.01, False)])
+@pytest.mark.parametrize("close,fires", [(105.0, True), (95.0, True), (104.99, False), (95.01, False), (104.999, False), (95.001, False)])
 def test_daily_move_boundary(close, fires):
     snap = _one(100.0, close, baseline=close)  # baseline == close keeps baseline alerts quiet
     assert ("DAILY_MOVE" in snap.positions[0].alerts) is fires
@@ -162,10 +164,88 @@ def test_closes_after_as_of_do_not_count_toward_two():
     assert snap.degraded == ("AAA",)
 
 
-def test_all_degraded_pool_has_no_fabricated_percentages():
-    snap = simulate_day((_h("AAA", 1, 100.0),), (), AS_OF, fetch_prices=_fetch_from({"AAA": RuntimeError("x")}))
-    assert snap.total_value == 0.0
+def test_all_degraded_pool_has_no_fabricated_totals_or_percentages():
+    # A pool worth "0.00" when the provider is down is a plausible-but-wrong number.
+    snap = simulate_day((_h("AAA", 1, 100.0), _h("BBB", 1, 50.0)), (), AS_OF, fetch_prices=_fetch_from({"AAA": RuntimeError("x"), "BBB": RuntimeError("y")}))
+    assert (snap.total_value, snap.prev_total_value, snap.baseline_value) == (None, None, None)
     assert snap.daily_pct is None and snap.vs_baseline_pct is None
+    assert snap.prices_as_of is None
+
+
+def test_partially_degraded_pool_keeps_real_totals():
+    table = {"AAA": [_p(100.0, "2026-01-08"), _p(102.0, "2026-01-09")], "BBB": RuntimeError("down")}
+    snap = simulate_day((_h("AAA", 1, 100.0), _h("BBB", 1, 50.0)), (), AS_OF, fetch_prices=_fetch_from(table))
+    assert snap.total_value == pytest.approx(102.0) and snap.degraded == ("BBB",)
+
+
+# ── duplicate same-day bars: prev_close must be the prior SESSION ──
+def test_duplicate_date_rows_keep_last_and_prev_is_prior_session():
+    rows = [_p(100.0, "2026-01-08"), _p(110.0, "2026-01-09T00:00:00-05:00"), _p(110.5, "2026-01-09T15:59:00-05:00")]
+    snap = simulate_day((_h("AAA", 1, 110.5),), (), AS_OF, fetch_prices=_fetch_from({"AAA": rows}))
+    (p,) = snap.positions
+    assert (p.prev_close, p.close, p.close_date) == (100.0, 110.5, date(2026, 1, 9))
+    assert "DAILY_MOVE" in p.alerts
+
+
+def test_two_rows_on_one_date_are_one_close_not_two():
+    rows = [_p(110.0, "2026-01-09T00:00:00-05:00"), _p(110.5, "2026-01-09T15:59:00-05:00")]
+    snap = simulate_day((_h("AAA", 1, 100.0),), (), AS_OF, fetch_prices=_fetch_from({"AAA": rows}))
+    assert snap.degraded == ("AAA",)
+
+
+# ── freshness: which close the numbers are from must be visible ──
+def test_prices_as_of_is_most_common_close_date_and_odd_one_out_is_mixed_date():
+    table = {
+        "AAA": [_p(100.0, "2026-01-07"), _p(100.0, "2026-01-08")],
+        "BBB": [_p(50.0, "2026-01-07"), _p(50.0, "2026-01-08")],
+        "CCC": [_p(10.0, "2026-01-08"), _p(10.0, "2026-01-09")],
+    }
+    holdings = (_h("AAA", 1, 100.0), _h("BBB", 1, 50.0), _h("CCC", 1, 10.0))
+    snap = simulate_day(holdings, (), AS_OF, fetch_prices=_fetch_from(table))
+    assert snap.prices_as_of == date(2026, 1, 8)
+    by = {p.ticker: p for p in snap.positions}
+    assert "MIXED_DATE" in by["CCC"].alerts
+    assert "MIXED_DATE" not in by["AAA"].alerts and "MIXED_DATE" not in by["BBB"].alerts
+    assert ("CCC", "MIXED_DATE") in snap.alerts
+
+
+def test_uniform_close_dates_raise_no_mixed_date():
+    snap = _one(100.0, 101.0)
+    assert snap.prices_as_of == date(2026, 1, 9)
+    assert "MIXED_DATE" not in snap.positions[0].alerts
+
+
+# ── intraday guard: a same-day bar before the close settles is not a close ──
+_INTRADAY_ROWS = [_p(99.0, "2026-01-07"), _p(100.0, "2026-01-08"), _p(110.0, "2026-01-09")]
+
+
+@pytest.mark.parametrize(
+    "now,close,close_day",
+    [
+        (datetime(2026, 1, 9, 10, 0, tzinfo=ET), 100.0, date(2026, 1, 8)),  # market open: drop today's bar
+        (datetime(2026, 1, 9, 16, 14, tzinfo=ET), 100.0, date(2026, 1, 8)),  # just before settle
+        (datetime(2026, 1, 9, 16, 15, tzinfo=ET), 110.0, date(2026, 1, 9)),  # settled
+        (datetime(2026, 1, 9, 21, 30, tzinfo=timezone.utc), 110.0, date(2026, 1, 9)),  # 16:30 ET given in UTC
+        (datetime(2026, 1, 9, 20, 0, tzinfo=timezone.utc), 100.0, date(2026, 1, 8)),  # 15:00 ET given in UTC
+        (datetime(2026, 1, 12, 9, 0, tzinfo=ET), 110.0, date(2026, 1, 9)),  # as_of in the past: untouched
+    ],
+)
+def test_intraday_guard_uses_prior_close_until_1615_et(now, close, close_day):
+    snap = simulate_day((_h("AAA", 1, 100.0),), (), AS_OF, fetch_prices=_fetch_from({"AAA": list(_INTRADAY_ROWS)}), now=now)
+    (p,) = snap.positions
+    assert (p.close, p.close_date) == (close, close_day)
+    assert snap.prices_as_of == close_day
+
+
+# ── unknown cost basis flows through as unknown ──
+def test_unknown_cost_estimate_flag_reaches_snapshot():
+    holdings = (_h("AAA", 10, 100.0),)  # cost unknown
+    fetch = _fetch_from({"AAA": [_p(100.0, "2026-01-08"), _p(110.0, "2026-01-09")]})
+    buy = simulate_day(holdings, (Trade(date(2026, 1, 5), "AAA", "buy", 10, 120.0, ""),), AS_OF, fetch_prices=fetch)
+    assert buy.positions[0].cost_basis is None and buy.positions[0].unrealized_pnl is None
+    assert buy.realized_pnl_estimated is False
+    sell = simulate_day(holdings, (Trade(date(2026, 1, 5), "AAA", "sell", 4, 130.0, ""),), AS_OF, fetch_prices=fetch)
+    assert sell.realized_pnl == pytest.approx(120.0) and sell.realized_pnl_estimated is True
 
 
 # ── ledger flows into the snapshot ──

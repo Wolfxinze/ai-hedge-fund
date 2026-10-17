@@ -23,6 +23,7 @@ from src.evals.runner import run_case
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
 _HEADER = "ticker,shares,baseline_price,baseline_date,cost_basis\n"
+_TRADES_HEADER = "date,ticker,side,shares,price,note\n"
 _CORE = ["technical_analyst", "fundamentals_analyst", "growth_analyst", "sentiment_analyst", "valuation_analyst"]
 
 
@@ -35,12 +36,12 @@ def prices(monkeypatch):
     """Stub the provider. Tickers listed in ``down`` raise; others get two closes."""
     import src.tools.api as api
 
-    state = {"down": set()}
+    state = {"down": set(), "rows": {}}
 
     def fake_get_prices(ticker, start_date, end_date, api_key=None):
         if ticker in state["down"]:
             raise RuntimeError(f"{ticker} provider down")
-        return [_p(100.0, "2026-01-08"), _p(101.0, "2026-01-09")]
+        return state["rows"].get(ticker, [_p(100.0, "2026-01-08"), _p(101.0, "2026-01-09")])
 
     monkeypatch.setattr(api, "get_prices", fake_get_prices)
     return state
@@ -52,10 +53,27 @@ def _holdings(tmp_path, body="AAA,10,100,2026-01-02,\nBBB,5,50,2026-01-02,90\n")
     return p
 
 
-def _run(tmp_path, *extra):
+@pytest.fixture(autouse=True)
+def _no_ambient_trades_env(monkeypatch):
+    # A developer's shell export must never leak a real ledger into these runs.
+    monkeypatch.delenv("BIT_POOL_TRADES_PATH", raising=False)
+
+
+def _ledger(tmp_path, body="", name="trades.csv"):
+    p = tmp_path / name
+    p.write_text(_TRADES_HEADER + body, encoding="utf-8")
+    return p
+
+
+def _run(tmp_path, *extra, body=None):
     out = tmp_path / "out"
-    argv = ["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path)), "--trades", str(tmp_path / "none.csv"), "--out", str(out), *extra]
+    holdings = _holdings(tmp_path) if body is None else _holdings(tmp_path, body)
+    argv = ["run", "--date", "2026-01-09", "--holdings", str(holdings), "--trades", str(_ledger(tmp_path)), "--out", str(out), *extra]
     return cli.main(argv), out
+
+
+def _json(out):
+    return json.loads((out / "2026-01-09.json").read_text(encoding="utf-8"))
 
 
 def test_ok_run_exits_0_and_writes_json_and_markdown(tmp_path, prices, capsys):
@@ -104,7 +122,7 @@ def test_bad_date_exits_1_not_2(tmp_path, capsys):
 
 def test_holdings_path_from_env(tmp_path, prices, monkeypatch):
     monkeypatch.setenv("BIT_POOL_PATH", str(_holdings(tmp_path)))
-    code = cli.main(["run", "--date", "2026-01-09", "--trades", str(tmp_path / "none.csv"), "--out", str(tmp_path / "o")])
+    code = cli.main(["run", "--date", "2026-01-09", "--trades", str(_ledger(tmp_path)), "--out", str(tmp_path / "o")])
     assert code == 0
 
 
@@ -163,7 +181,8 @@ def test_committee_core_uses_five_llm_free_keys_and_passes_model_provider(tmp_pa
     assert all(c["keys"] == _CORE and c["model"] == "gpt-x" and c["provider"] == "OpenAI" and c["end"] == "2026-01-09" for c in calls)
     committee = json.loads((out / "2026-01-09.json").read_text(encoding="utf-8"))["committee"]
     assert committee[0]["band"] == "thesis-supportive"
-    assert committee[0]["mean_score"] >= 60.0  # all-bullish -> supportive band
+    assert committee[0]["mean_score"] == 90.0  # bullish @80 -> (80+100)/2 = 90 for all five
+    assert committee[0]["coverage"] == "5/5"
     assert committee[0]["analysts"]["technical_analyst"] == "bullish"
 
 
@@ -229,7 +248,7 @@ def _muse_file(path, as_of="2026-01-09", signals=None):
 
 def _run_muse(tmp_path, *extra, body="AAA,10,100,2026-01-02,\nBBB,5,50,2026-01-02,90\nCCC,1,10,2026-01-02,\n"):
     out = tmp_path / "out"
-    argv = ["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path, body)), "--trades", str(tmp_path / "none.csv"), "--out", str(out), "--committee", "muse", *extra]
+    argv = ["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path, body)), "--trades", str(_ledger(tmp_path)), "--out", str(out), "--committee", "muse", *extra]
     code = cli.main(argv)
     data = json.loads((out / "2026-01-09.json").read_text(encoding="utf-8")) if (out / "2026-01-09.json").exists() else None
     return code, data, out
@@ -242,6 +261,7 @@ def test_muse_committee_end_to_end_bands_and_absent_ticker(tmp_path, prices):
     assert rows["BBB"]["band"] == "thesis-challenging"
     # Muse said nothing about CCC: absent, not scored zero -> insufficient evidence, degraded.
     assert rows["CCC"]["band"] is None and "insufficient evidence" in rows["CCC"]["degraded_reason"]
+    assert (rows["AAA"]["coverage"], rows["CCC"]["coverage"]) == ("5/5", "0/5")
     assert code == 2
     assert (data["book"], data["committee_source"], data["committee_signals_as_of"]) == ("muse", "muse", "2026-01-09")
     assert "Committee: Muse agent signals as of 2026-01-09" in (out / "2026-01-09.md").read_text(encoding="utf-8")
@@ -259,9 +279,10 @@ def test_muse_committee_all_present_exits_0_and_reads_dir_from_env(tmp_path, pri
     assert [c["band"] for c in data["committee"]] == ["thesis-supportive", "thesis-challenging"]
 
 
-def test_muse_stale_signals_degrade_every_row_and_exit_2(tmp_path, prices):
+def test_muse_stale_signals_degrade_every_row_and_exit_1(tmp_path, prices):
+    # Every committee row degraded is systemic (Muse did not deliver), not a per-ticker blip.
     code, data, _ = _run_muse(tmp_path, "--muse-signals", str(_muse_file(tmp_path / "s.json", as_of="2026-01-04")))
-    assert code == 2
+    assert code == 1
     assert all(c["band"] is None and "stale" in c["degraded_reason"] and "2026-01-04" in c["degraded_reason"] for c in data["committee"])
     assert len(data["committee"]) == 3
 
@@ -271,7 +292,7 @@ def test_muse_dir_without_qualifying_file_degrades_every_row(tmp_path, prices):
     sig_dir.mkdir()
     _muse_file(sig_dir / "2026-01-10.json", as_of="2026-01-10")
     code, data, _ = _run_muse(tmp_path, "--muse-signals", str(sig_dir))
-    assert code == 2
+    assert code == 1
     assert all(c["degraded_reason"] == "no Muse signals on or before 2026-01-09" for c in data["committee"])
     assert data["committee_signals_as_of"] is None
 
@@ -341,3 +362,183 @@ def test_planted_trade_import_would_be_flagged(tmp_path):
     (tmp_path / "planted.py").write_text("from src.agents.portfolio_manager import portfolio_management_agent\n", encoding="utf-8")
     hit = nt._forbidden_imports_in(tmp_path, ("planted",))
     assert hit is not None and hit[0] == "planted"
+
+
+# ── A: trades ledger path ──
+def test_explicit_missing_trades_file_exits_1_and_writes_nothing(tmp_path, prices, capsys):
+    missing = tmp_path / "typo.csv"
+    code = cli.main(["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path)), "--trades", str(missing), "--out", str(tmp_path / "o")])
+    assert code == 1
+    assert f"trades ledger not found: {missing}" in capsys.readouterr().err
+    assert not (tmp_path / "o").exists()
+
+
+def test_implicit_default_trades_may_be_absent(tmp_path, prices, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # no data/pools/bit_pool_trades.csv here
+    code = cli.main(["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path)), "--out", str(tmp_path / "o")])
+    assert code == 0
+    data = _json(tmp_path / "o")
+    assert (data["trades_source"], data["trades_applied"]) == (None, 0)
+    assert "Trades applied: 0 (no ledger)" in (tmp_path / "o" / "2026-01-09.md").read_text(encoding="utf-8")
+
+
+def test_implicit_default_trades_used_when_present(tmp_path, prices, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data" / "pools").mkdir(parents=True)
+    _ledger(tmp_path / "data" / "pools", "2026-01-05,AAA,buy,1,100,\n", name="bit_pool_trades.csv")
+    assert cli.main(["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path)), "--out", str(tmp_path / "o")]) == 0
+    data = _json(tmp_path / "o")
+    assert (data["trades_source"], data["trades_applied"]) == ("data/pools/bit_pool_trades.csv", 1)
+
+
+def test_trades_path_from_env_is_honoured_and_counts_only_rows_through_as_of(tmp_path, prices, monkeypatch):
+    ledger = _ledger(tmp_path, "2026-01-05,AAA,buy,2,100,\n2026-01-20,AAA,sell,1,100,\n", name="env_trades.csv")
+    monkeypatch.setenv("BIT_POOL_TRADES_PATH", str(ledger))
+    out = tmp_path / "o"
+    assert cli.main(["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path)), "--out", str(out)]) == 0
+    data = _json(out)
+    assert (data["trades_source"], data["trades_applied"]) == (str(ledger), 1)
+    assert {p["ticker"]: p["shares"] for p in data["positions"]}["AAA"] == 12.0
+    assert f"Trades applied: 1 ({ledger})" in (out / "2026-01-09.md").read_text(encoding="utf-8")
+
+
+def test_env_trades_path_that_does_not_exist_exits_1(tmp_path, prices, monkeypatch, capsys):
+    monkeypatch.setenv("BIT_POOL_TRADES_PATH", str(tmp_path / "moved.csv"))
+    assert cli.main(["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path)), "--out", str(tmp_path / "o")]) == 1
+    assert "trades ledger not found" in capsys.readouterr().err
+
+
+# ── E: freshness ──
+def test_stale_close_exits_2(tmp_path, prices):
+    prices["rows"]["AAA"] = [_p(100.0, "2025-12-30"), _p(100.0, "2025-12-31")]
+    code, out = _run(tmp_path, body="AAA,10,100,2026-01-02,\n")
+    assert code == 2
+    assert {"ticker": "AAA", "alert": "STALE"} in _json(out)["alerts"]
+    assert _json(out)["degraded"] == []
+
+
+def test_future_date_exits_1(tmp_path, prices, capsys):
+    code = cli.main(["run", "--date", "2999-01-01", "--holdings", str(_holdings(tmp_path)), "--trades", str(_ledger(tmp_path)), "--out", str(tmp_path / "o")])
+    assert code == 1
+    assert "future" in capsys.readouterr().err
+    assert not (tmp_path / "o").exists()
+
+
+def test_markdown_shows_prices_as_of_and_close_date(tmp_path, prices):
+    code, out = _run(tmp_path)
+    md = (out / "2026-01-09.md").read_text(encoding="utf-8")
+    assert code == 0 and "Prices as of: 2026-01-09" in md and "Close date 收盘日" in md
+    assert _json(out)["prices_as_of"] == "2026-01-09"
+
+
+# ── F: partial / all-degraded pools ──
+def test_partial_pool_flagged_in_json(tmp_path, prices):
+    prices["down"].add("BBB")
+    code, out = _run(tmp_path)
+    assert code == 2
+    assert (_json(out)["partial"], _json(out)["excluded_tickers"]) == (True, ["BBB"])
+    assert "PARTIAL — excludes BBB" in (out / "2026-01-09.md").read_text(encoding="utf-8")
+
+
+def test_every_position_degraded_is_systemic_exit_1_with_null_totals(tmp_path, prices, capsys):
+    prices["down"].update({"AAA", "BBB"})
+    code, out = _run(tmp_path)
+    assert code == 1
+    assert "every position degraded" in capsys.readouterr().err
+    data = _json(out)
+    assert (data["total_value"], data["prev_total_value"], data["baseline_value"], data["daily_pct"], data["vs_baseline_pct"]) == (None,) * 5
+    assert "Total value: n/a" in (out / "2026-01-09.md").read_text(encoding="utf-8")
+
+
+# ── G: committee coverage + degraded analysts ──
+def _fake_scoring_partial(bad_keys):
+    def fake(tickers, selected_analysts, end_date, **_kw):
+        (ticker,) = tickers
+        return {f"{k}_agent": {ticker: {"signal": "garbage" if k in bad_keys else "bullish", "confidence": 80}} for k in selected_analysts}, {}
+
+    return fake
+
+
+def test_degraded_analysts_excluded_from_mean_and_visibly_marked(tmp_path, prices, monkeypatch):
+    from src.observing_pools import scoring_graph
+
+    monkeypatch.setattr(scoring_graph, "run_scoring_analysts", _fake_scoring_partial({"growth_analyst", "sentiment_analyst"}))
+    code, out = _run(tmp_path, "--committee", "core")
+    assert code == 0  # partial analyst degradation keeps the band
+    row = _json(out)["committee"][0]
+    # 3 valid bullish @80 -> 90 each; counting the 2 degraded (scored 50) would give 74.
+    assert row["mean_score"] == 90.0
+    assert row["coverage"] == "3/5"
+    assert row["analysts"]["growth_analyst"] == {"signal": "neutral", "degraded": True}
+    assert row["analysts"]["technical_analyst"] == "bullish"
+    md = (out / "2026-01-09.md").read_text(encoding="utf-8")
+    assert "growth_analyst: neutral (DEGRADED)" in md and "| 3/5 |" in md
+
+
+def test_every_ticker_committee_failing_exits_1(tmp_path, prices, monkeypatch, capsys):
+    from src.observing_pools import scoring_graph
+
+    monkeypatch.setattr(scoring_graph, "run_scoring_analysts", _fake_scoring([], fail_for={"AAA", "BBB"}))
+    code, out = _run(tmp_path, "--committee", "core")
+    assert code == 1
+    assert "every committee ticker degraded" in capsys.readouterr().err
+    assert all(c["coverage"] == "0/5" for c in _json(out)["committee"])
+
+
+def test_muse_file_with_empty_signals_degrades_every_row_with_specific_reason(tmp_path, prices):
+    code, data, _ = _run_muse(tmp_path, "--muse-signals", str(_muse_file(tmp_path / "s.json", signals={})))
+    assert code == 1
+    assert [c["degraded_reason"] for c in data["committee"]] == ["Muse signals file has no signals"] * 3
+
+
+# ── I: atomic writes + book guard ──
+def test_reports_render_fully_before_any_write(tmp_path, prices, monkeypatch):
+    def boom(*_a, **_kw):
+        raise ValueError("render failed")
+
+    monkeypatch.setattr(cli, "render_markdown", boom)
+    code, out = _run(tmp_path)
+    assert code == 1
+    assert not (out / "2026-01-09.json").exists()  # no half-written report pair
+
+
+def test_reports_are_written_via_tmp_and_os_replace(tmp_path, prices, monkeypatch):
+    calls = []
+    real = os.replace
+
+    def spy(src, dst):
+        calls.append((pathlib.Path(src).name, pathlib.Path(dst).name))
+        return real(src, dst)
+
+    monkeypatch.setattr(cli.os, "replace", spy)
+    code, out = _run(tmp_path)
+    assert code == 0
+    assert calls == [("2026-01-09.json.tmp", "2026-01-09.json"), ("2026-01-09.md.tmp", "2026-01-09.md")]
+    assert sorted(p.name for p in out.iterdir()) == ["2026-01-09.json", "2026-01-09.md"]
+
+
+def test_refuses_to_overwrite_a_different_book_and_writes_nothing(tmp_path, prices, capsys):
+    out = tmp_path / "out"
+    out.mkdir()
+    existing = out / "2026-01-09.json"
+    existing.write_text(json.dumps({"book": "muse"}), encoding="utf-8")
+    code, _ = _run(tmp_path, "--label", "real")
+    assert code == 1
+    assert "refusing to overwrite book muse with book real" in capsys.readouterr().err
+    assert json.loads(existing.read_text(encoding="utf-8")) == {"book": "muse"}
+    assert not (out / "2026-01-09.md").exists()
+
+
+def test_same_book_rerun_overwrites(tmp_path, prices):
+    assert _run(tmp_path, "--label", "muse")[0] == 0
+    code, out = _run(tmp_path, "--label", "muse")
+    assert code == 0 and _json(out)["book"] == "muse"
+
+
+# ── J: a sell of an unheld ticker is a clean error ──
+def test_tiny_sell_of_unheld_ticker_exits_1(tmp_path, prices, capsys):
+    trades = _ledger(tmp_path, "2026-01-05,ZZZ,sell,0.0000000001,100,\n", name="t.csv")
+    code = cli.main(["run", "--date", "2026-01-09", "--holdings", str(_holdings(tmp_path)), "--trades", str(trades), "--out", str(tmp_path / "o")])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "oversell" in err and "ZZZ" in err

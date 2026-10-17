@@ -150,9 +150,13 @@ def test_buy_increases_shares_and_updates_weighted_average_cost():
     assert res.realized_pnl == 0.0
 
 
-def test_buy_without_cost_basis_uses_baseline_as_cost():
+def test_buy_into_unknown_cost_position_keeps_cost_unknown():
+    # Blending baseline_price in would FABRICATE a cost (110 here) and with it an
+    # unrealized P&L the owner never had; unknown must stay unknown.
     res = apply_trades((_h(cost=None, baseline=100.0),), (_t(date(2026, 1, 5), "AAA", "buy", 10, 120.0),), date(2026, 1, 9))
-    assert res.holdings[0].cost_basis == pytest.approx(110.0)
+    assert res.holdings[0].shares == 20.0
+    assert res.holdings[0].cost_basis is None
+    assert res.realized_pnl_estimated is False
 
 
 def test_buy_new_ticker_creates_position_at_trade_price():
@@ -169,9 +173,15 @@ def test_sell_reduces_shares_and_realizes_pnl_against_cost_basis():
     assert res.net_cash_flow == pytest.approx(520.0)
 
 
-def test_sell_without_cost_basis_realizes_against_baseline():
+def test_sell_without_cost_basis_realizes_against_baseline_and_flags_estimate():
     res = apply_trades((_h(cost=None, baseline=90.0),), (_t(date(2026, 1, 5), "AAA", "sell", 4, 130.0),), date(2026, 1, 9))
     assert res.realized_pnl == pytest.approx(160.0)
+    assert res.realized_pnl_estimated is True  # vs baseline, not a real cost — must be labelled
+
+
+def test_known_cost_sell_is_not_an_estimate():
+    res = apply_trades((_h(cost=100.0, baseline=90.0),), (_t(date(2026, 1, 5), "AAA", "sell", 4, 130.0),), date(2026, 1, 9))
+    assert res.realized_pnl_estimated is False
 
 
 def test_trades_applied_in_date_order_and_after_as_of_ignored():
@@ -211,3 +221,106 @@ def test_apply_trades_does_not_mutate_inputs():
     original = (_h(cost=100.0),)
     apply_trades(original, (_t(date(2026, 1, 5), "AAA", "buy", 10, 120.0),), date(2026, 1, 9))
     assert original == (_h(cost=100.0),)
+
+
+def test_tiny_sell_of_unheld_ticker_raises_oversell_not_attribute_error():
+    # Below the zero-shares slack the old code fell through to cost lookup on None.
+    with pytest.raises(ValueError, match="oversell.*ZZZ"):
+        apply_trades((_h(),), (_t(date(2026, 1, 5), "ZZZ", "sell", 1e-10, 100.0),), date(2026, 1, 9))
+
+
+# ── baseline_date: the baseline is end-of-day on baseline_date ──
+@pytest.mark.parametrize("trade_day", [date(2026, 1, 2), date(2026, 1, 1)])
+def test_trade_on_or_before_baseline_date_is_rejected_naming_ticker_and_date(trade_day):
+    # The baseline already reflects that fill; applying it again double-counts shares.
+    with pytest.raises(ValueError, match=f"AAA.*{trade_day.isoformat()}.*already included in baseline"):
+        apply_trades((_h(),), (_t(trade_day, "AAA", "buy", 1, 100.0),), date(2026, 1, 9))
+
+
+def test_as_of_before_a_baseline_date_is_rejected():
+    with pytest.raises(ValueError, match="AAA.*2026-01-02"):
+        apply_trades((_h(),), (), date(2026, 1, 1))
+
+
+def test_buy_of_new_ticker_before_others_baseline_date_still_works():
+    res = apply_trades((_h(),), (_t(date(2026, 1, 1), "BBB", "buy", 3, 50.0),), date(2026, 1, 9))
+    assert {h.ticker for h in res.holdings} == {"AAA", "BBB"}
+
+
+# ── CSV hardening: a malformed row must never be half-read ──
+def test_extra_field_rejected_with_line_and_ticker(tmp_path):
+    p = _write(tmp_path, "AAA,1,10,2026-01-02,,stray\n")
+    with pytest.raises(ValueError, match="line 2.*AAA.*extra"):
+        load_holdings(p)
+
+
+def test_missing_field_rejected_with_line_and_ticker(tmp_path):
+    p = _write(tmp_path, "AAA,1,10,2026-01-02,\nBBB,1,10,2026-01-02\n")
+    with pytest.raises(ValueError, match="line 3.*BBB.*missing"):
+        load_holdings(p)
+
+
+def test_trades_missing_and_extra_fields_rejected(tmp_path):
+    short = _write(tmp_path, "2026-01-05,AAA,buy,2,110\n", name="t.csv", header=_TRADES_HEADER)
+    with pytest.raises(ValueError, match="line 2.*AAA.*missing"):
+        load_trades(short)
+    long = _write(tmp_path, "2026-01-05,AAA,buy,2,110,n,x\n", name="t2.csv", header=_TRADES_HEADER)
+    with pytest.raises(ValueError, match="line 2.*AAA.*extra"):
+        load_trades(long)
+
+
+def test_line_number_counts_physical_lines_across_quoted_newlines(tmp_path):
+    body = '2026-01-05,AAA,buy,2,110,"multi\nline note"\n2026-01-06,AAA,hold,1,110,\n'
+    p = _write(tmp_path, body, name="t.csv", header=_TRADES_HEADER)
+    with pytest.raises(ValueError, match="line 4"):
+        load_trades(p)
+
+
+def test_bom_prefixed_csv_loads(tmp_path):
+    p = tmp_path / "bom.csv"
+    p.write_text(_HEADER + "AAA,1,10,2026-01-02,\n", encoding="utf-8-sig")
+    assert load_holdings(p)[0].ticker == "AAA"
+    t = tmp_path / "bomt.csv"
+    t.write_text(_TRADES_HEADER + "2026-01-05,AAA,buy,2,110,\n", encoding="utf-8-sig")
+    assert load_trades(t)[0].ticker == "AAA"
+
+
+def test_non_utf8_file_error_names_the_path(tmp_path):
+    p = tmp_path / "latin.csv"
+    p.write_bytes(_HEADER.encode() + "AAA,1,10,2026-01-02,caf\xe9\n".encode("latin-1"))
+    with pytest.raises(ValueError, match="latin.csv"):
+        load_holdings(p)
+
+
+@pytest.mark.parametrize(
+    "row",
+    ["AAA,inf,10,2026-01-02,\n", "AAA,1,Infinity,2026-01-02,\n", "AAA,1,10,2026-01-02,1e999\n"],
+)
+def test_non_finite_numbers_rejected(tmp_path, row):
+    with pytest.raises(ValueError, match="AAA"):
+        load_holdings(_write(tmp_path, row))
+
+
+def test_non_finite_trade_price_rejected(tmp_path):
+    p = _write(tmp_path, "2026-01-05,AAA,buy,2,inf,\n", name="t.csv", header=_TRADES_HEADER)
+    with pytest.raises(ValueError, match="line 2"):
+        load_trades(p)
+
+
+def test_header_only_holdings_rejected(tmp_path):
+    with pytest.raises(ValueError, match="holdings file has no positions"):
+        load_holdings(_write(tmp_path, ""))
+
+
+def test_header_only_trades_file_is_no_trades(tmp_path):
+    assert load_trades(_write(tmp_path, "", name="t.csv", header=_TRADES_HEADER)) == ()
+
+
+# ── trades path resolution: an explicit path must exist ──
+def test_resolve_trades_path_precedence_and_explicitness():
+    from src.bit_pool.holdings import DEFAULT_TRADES_PATH, TRADES_PATH_ENV, resolve_trades_path
+
+    assert resolve_trades_path("x.csv", {TRADES_PATH_ENV: "env.csv"}) == (Path("x.csv"), True)
+    assert resolve_trades_path(None, {TRADES_PATH_ENV: "env.csv"}) == (Path("env.csv"), True)
+    assert resolve_trades_path(None, {}) == (DEFAULT_TRADES_PATH, False)
+    assert TRADES_PATH_ENV == "BIT_POOL_TRADES_PATH"
