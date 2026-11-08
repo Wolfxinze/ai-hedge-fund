@@ -1,0 +1,17 @@
+{
+  "comment": "Non-secret example. Virtual USD only. Copy and change dates to a window you have prices for. equal_weight is a deterministic plumbing rule, not an AI decision and not a performance claim.",
+  "label": "verify",
+  "initial_cash": 50000,
+  "currency": "USD",
+  "tickers": ["AAPL", "MSFT", "NVDA"],
+  "benchmark": "SPY",
+  "start": "2026-10-01",
+  "end": "2026-10-30",
+  "decision": "equal_weight",
+  "rebalance": "once",
+  "commission_bps": 5,
+  "slippage_bps": 5,
+  "long_only": true,
+  "max_gross_exposure": 1.0,
+  "data_mode": "yfinance_historical"
+}
