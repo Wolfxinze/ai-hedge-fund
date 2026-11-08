@@ -18,6 +18,8 @@ import pytest
 
 from src.bit_pool.paper_book import (
     assert_close_settled,
+    dump_json,
+    write_outputs,
     DATA_SYNTHETIC,
     DECISION_EQUAL,
     DECISION_TECHNICAL,
@@ -398,6 +400,21 @@ def test_cli_synthetic_book_is_labelled_and_idempotent(tmp_path):
     )
     assert rejected.returncode == 1
     assert "cannot be labelled yfinance_historical" in rejected.stderr
+
+
+def test_decisions_json_is_unchanged_when_the_state_is_reloaded(tmp_path):
+    config = _config()
+    state = new_state(config)
+    run_book(state, [D1, D2], _prices(), config, equal_weight_provider(config))
+    out = tmp_path / "out"
+    write_outputs(out, state, build_summary(state, sessions=[D1, D2]))
+    first = (out / "decisions.json").read_bytes()
+    save_state(tmp_path / "state.json", state)
+    loaded = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    write_outputs(out, loaded, build_summary(loaded, sessions=[D1, D2]))
+    second = (out / "decisions.json").read_bytes()
+    assert first == second
+    assert first == dump_json(loaded["decisions"]).encode("utf-8")
 
 
 def test_cli_help_mentions_paper_and_rejects_a_missing_window():

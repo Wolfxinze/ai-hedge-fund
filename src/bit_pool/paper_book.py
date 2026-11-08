@@ -882,7 +882,7 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def save_state(path: Path, state: dict) -> None:
-    _atomic_write(path, json.dumps(state, indent=2, sort_keys=True, allow_nan=False) + "\n")
+    _atomic_write(path, dump_json(state))
 
 
 def load_state(path: Path, config: PaperConfig) -> dict:
@@ -932,10 +932,20 @@ def _write_prices(path: Path, marks: Mapping[str, Mapping[str, float]]) -> None:
                 writer.writerow({"date": day, "ticker": ticker, "close": marks[day][ticker]})
 
 
+def dump_json(payload: object) -> str:
+    """Canonical JSON. Key order must not change between a first run and a resume.
+
+    ``state.json`` is already written with sorted keys. ``decisions.json`` used to
+    follow in-memory insertion order on the first run and sorted order after the
+    state file was reloaded, so a no-op resume changed its checksum.
+    """
+    return json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+
+
 def write_outputs(out: Path, state: dict, summary: dict) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    _atomic_write(out / "summary.json", json.dumps(summary, indent=2, allow_nan=False) + "\n")
-    _atomic_write(out / "decisions.json", json.dumps(state["decisions"], indent=2, allow_nan=False) + "\n")
+    _atomic_write(out / "summary.json", dump_json(summary))
+    _atomic_write(out / "decisions.json", dump_json(state["decisions"]))
     _write_fills(out / "fills.csv", state["fills"])
     _write_equity(out / "equity.csv", state["equity_curve"])
     _write_prices(out / "prices_used.csv", state["marks"])

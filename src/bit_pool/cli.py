@@ -99,6 +99,15 @@ def build_parser() -> argparse.ArgumentParser:
     paper.add_argument("--prices-csv", default=None, dest="prices_csv", help="date,ticker,close CSV instead of yfinance. Requires --data-label synthetic_fixture or supplied_prices")
     paper.add_argument("--data-label", default=None, dest="data_label", choices=("synthetic_fixture", "supplied_prices", "yfinance_historical"), help="required with --prices-csv; yfinance_historical is the live default and cannot be used with a CSV")
     paper.add_argument("--reset", action="store_true", help="delete the state file before running")
+    select = sub.add_parser(
+        "select",
+        help="rank the observing-pool seed and propose a virtual allocation (research-only; never places orders)",
+        description="Rank the repo seed universe from LLM-free analysts and real prices. Research only; never places orders. Does not fill the next session.",
+    )
+    select.add_argument("--universe", default="data/universes/ai_seed.csv", help="seed CSV (default: the observing-pool seed)")
+    select.add_argument("--cash", type=float, default=50000.0, help="virtual USD budget (default: 50000)")
+    select.add_argument("--as-of", default=None, help="YYYY-MM-DD upper bound. Default: last completed US session from SPY bars. A later date is an error.")
+    select.add_argument("--out", required=True, help="directory for pools.json, pools.csv, pools.md, proposed_orders.csv")
     return parser
 
 
@@ -277,6 +286,26 @@ def main(argv: list[str] | None = None) -> int:
         from src.bit_pool.paper_book import run_paper_cli
 
         return run_paper_cli(args)
+    if args.command == "select":
+        from datetime import date as _date
+        from pathlib import Path
+
+        from src.bit_pool.pool_select import run_select
+
+        try:
+            requested = _date.fromisoformat(args.as_of) if args.as_of else None
+            payload = run_select(Path(args.out), universe=Path(args.universe), cash=float(args.cash), requested=requested)
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f"bit_pool select: error: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        print(Path(args.out) / "pools.md")
+        counts = payload["counts"]
+        print(
+            f"session={payload['session_as_of']} candidates={counts['candidate']} watch={counts['watch']} "
+            f"avoid={counts['avoid']} excluded={counts['excluded']} "
+            f"pending_orders={len(payload['allocation']['orders'])} cash_remaining={payload['allocation']['cash_remaining']:.2f} llm=false"
+        )
+        return EXIT_OK
     try:
         return _run(args)
     except (ValueError, OSError) as exc:
