@@ -32,9 +32,10 @@ import re
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from src.bit_pool.simulate import CLOSE_SETTLED_AT, MARKET_TZ
 from src.compliance import research_disclaimer
 
 
@@ -109,6 +110,23 @@ class PaperConfig:
             "long_only": self.long_only,
             "max_gross_exposure": self.max_gross_exposure,
         }
+
+
+def assert_close_settled(config: PaperConfig, now: datetime) -> None:
+    """Refuse an end date on today's US session before 16:15 America/New_York.
+
+    The daily bit-pool snapshot ignores a bar that is still forming. This book
+    uses the same clock so a later ``--end today`` cannot fill against a
+    partial session. A window that already ended on an earlier date is unchanged.
+    """
+    now_et = now.astimezone(MARKET_TZ) if now.tzinfo is not None else now.replace(tzinfo=MARKET_TZ)
+    if config.end < now_et.date() or now_et.time() >= CLOSE_SETTLED_AT:
+        return
+    raise ValueError(
+        f"end {config.end.isoformat()} includes the US session of {now_et.date().isoformat()}, "
+        f"and it is {now_et.strftime('%H:%M')} America/New_York, before the close settles at "
+        f"{CLOSE_SETTLED_AT.strftime('%H:%M')}. Rerun after that. This book does not trade a partial bar."
+    )
 
 
 def execution_for(decision: str) -> str:
@@ -1023,6 +1041,7 @@ def run_paper_cli(args: object, *, today: date | None = None) -> int:
                 raise ValueError("--data-label synthetic_fixture and supplied_prices require --prices-csv")
             merged["data_mode"] = DATA_YFINANCE
         config = config_from_mapping(merged, today=today)
+        assert_close_settled(config, datetime.now(MARKET_TZ))
         out = Path(args.out)
         state_path = Path(args.state) if getattr(args, "state", None) else out / "state.json"
         if getattr(args, "reset", False) and state_path.exists():

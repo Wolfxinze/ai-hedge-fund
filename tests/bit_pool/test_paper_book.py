@@ -10,12 +10,14 @@ import json
 import os
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from src.bit_pool.paper_book import (
+    assert_close_settled,
     DATA_SYNTHETIC,
     DECISION_EQUAL,
     DECISION_TECHNICAL,
@@ -279,6 +281,17 @@ def test_config_mismatch_and_empty_prices_and_window_guards(tmp_path):
         validate_config(_config(start=date(2024, 1, 1), end=date(2025, 6, 1)), today=TODAY)
     with pytest.raises(ValueError, match="no leverage"):
         validate_config(_config(max_gross_exposure=1.5), today=TODAY)
+
+
+def test_unsettled_us_session_is_refused_and_a_past_window_is_not():
+    et = ZoneInfo("America/New_York")
+    morning = datetime(2026, 11, 8, 10, 0, tzinfo=et)
+    settled = datetime(2026, 11, 8, 16, 15, tzinfo=et)
+    today_config = _config(start=date(2026, 11, 2), end=date(2026, 11, 8))
+    with pytest.raises(ValueError, match="16:15"):
+        assert_close_settled(today_config, morning)
+    assert_close_settled(today_config, settled)
+    assert_close_settled(_config(), morning)
 
 
 def test_weekly_decision_dates_are_not_daily():
