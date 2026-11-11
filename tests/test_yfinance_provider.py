@@ -418,3 +418,14 @@ def test_yfinance_insider_direction_falls_back_to_transaction_column(fake_provid
     trades = provider.get_insider_trades("FAKE_TXCOL", "2024-12-31", start_date="2024-12-01")
 
     assert trades[0].transaction_shares == -10.0
+
+
+def test_yfinance_insider_direction_ignores_missing_text(fake_provider):
+    """A missing Text cell arrives as NaN, which is truthy; it must not hide the
+    direction given in the Transaction column."""
+    provider, fake = fake_provider
+    fake.insider_transactions = _insider_rows({"Shares": 10.0, "Value": 1000.0, "Text": float("nan"), "Transaction": "Sale"})
+
+    trades = provider.get_insider_trades("FAKE_NANTEXT", "2024-12-31", start_date="2024-12-01")
+
+    assert trades[0].transaction_shares == -10.0

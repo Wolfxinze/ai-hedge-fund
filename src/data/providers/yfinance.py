@@ -132,7 +132,12 @@ def _insider_direction(row) -> int | None:
     transaction in ``Text`` (``Transaction`` is usually blank). Awards, gifts and
     option exercises are not the insider buying or selling in the market.
     """
-    label = str(row.get("Text") or row.get("Transaction") or "").strip().lower()
+    label = ""
+    for column in ("Text", "Transaction"):
+        value = row.get(column)
+        if isinstance(value, str) and value.strip():
+            label = value.strip().lower()
+            break
     if label.startswith("sale"):
         return -1
     if label.startswith(("purchase", "buy")):
