@@ -70,3 +70,36 @@ def test_all_yfinance_fetch_methods_raise_on_transport_failure(monkeypatch, call
     monkeypatch.setattr(provider, "_ticker", lambda ticker: _AllRaisingTicker())
     with pytest.raises(ProviderFetchError):
         call(provider)
+
+
+class _YahooDownNewsTicker:
+    """yfinance raises a bare RuntimeError ("YAHOO! FINANCE IS CURRENTLY DOWN")
+    when the news endpoint answers with an error page."""
+
+    @property
+    def news(self):
+        raise RuntimeError("*** YAHOO! FINANCE IS CURRENTLY DOWN! ***")
+
+
+def test_news_runtime_error_from_yahoo_is_a_fetch_error(monkeypatch):
+    """A dead news endpoint is a fetch failure: it must raise ProviderFetchError
+    so only the analyst that needs news degrades. As a bare RuntimeError it
+    escaped the analyst boundary and failed every ticker's whole committee."""
+    provider = YFinanceProvider()
+    monkeypatch.setattr(provider, "_ticker", lambda ticker: _YahooDownNewsTicker())
+    with pytest.raises(ProviderFetchError):
+        provider.get_company_news("DOWN_NEWS", "2024-02-01")
+
+
+def test_missing_yfinance_package_still_raises_runtime_error(monkeypatch):
+    """A missing package is a setup error, not an outage: it must stay loud and
+    must not be downgraded to a per-analyst degradation."""
+    provider = YFinanceProvider()
+
+    def _no_package():
+        raise RuntimeError("The yfinance package is required when FINANCIAL_DATA_PROVIDER=yfinance.")
+
+    monkeypatch.setattr(provider, "_yf", _no_package)
+    with pytest.raises(RuntimeError) as excinfo:
+        provider.get_company_news("NOPKG_NEWS", "2024-02-01")
+    assert not isinstance(excinfo.value, ProviderFetchError)

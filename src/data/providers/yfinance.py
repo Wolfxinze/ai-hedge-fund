@@ -125,6 +125,21 @@ def _is_current_date(value: str) -> bool:
     return parsed.date() >= datetime.datetime.now().date()
 
 
+def _insider_direction(row) -> int | None:
+    """-1 for a sale, +1 for a purchase, None when the row carries no direction.
+
+    Yahoo reports every insider row with a positive share count and describes the
+    transaction in ``Text`` (``Transaction`` is usually blank). Awards, gifts and
+    option exercises are not the insider buying or selling in the market.
+    """
+    label = str(row.get("Text") or row.get("Transaction") or "").strip().lower()
+    if label.startswith("sale"):
+        return -1
+    if label.startswith(("purchase", "buy")):
+        return 1
+    return None
+
+
 class YFinanceProvider(FinancialDataProvider):
     name = "yfinance"
 
@@ -508,6 +523,8 @@ class YFinanceProvider(FinancialDataProvider):
             shares = _safe_float(row.get("Shares"))
             value = _safe_float(row.get("Value"))
             price_per_share = _ratio(value, abs(shares)) if shares else None
+            direction = _insider_direction(row)
+            signed_shares = None if shares is None or direction is None else direction * abs(shares)
             filing_date = _date_str(raw_date)
 
             trades.append(
@@ -518,7 +535,7 @@ class YFinanceProvider(FinancialDataProvider):
                     title=row.get("Position"),
                     is_board_director=None,
                     transaction_date=filing_date,
-                    transaction_shares=shares,
+                    transaction_shares=signed_shares,
                     transaction_price_per_share=price_per_share,
                     transaction_value=value,
                     shares_owned_before_transaction=None,
@@ -558,10 +575,12 @@ class YFinanceProvider(FinancialDataProvider):
         if cached_data := _cache.get_company_news(cache_key):
             return [CompanyNews(**news) for news in cached_data]
 
+        # yfinance raises a bare RuntimeError when Yahoo's news endpoint is down;
+        # that is a fetch failure. Only a missing package (raised by _ticker) stays
+        # a RuntimeError.
+        yf_ticker = self._ticker(ticker)
         try:
-            items = self._ticker(ticker).news or []
-        except RuntimeError:
-            raise
+            items = yf_ticker.news or []
         except Exception as exc:
             raise ProviderFetchError(f"yfinance fetch failed for {ticker}") from exc
 

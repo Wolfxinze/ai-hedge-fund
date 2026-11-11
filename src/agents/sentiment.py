@@ -42,6 +42,7 @@ def sentiment_analyst_agent(state: AgentState, agent_id: str = "sentiment_analys
 
         # Get the sentiment from the company news
         sentiment = pd.Series([n.sentiment for n in company_news]).dropna()
+        unscored_articles = len(company_news) - len(sentiment)
         news_signals = np.where(sentiment == "negative", "bearish", 
                               np.where(sentiment == "positive", "bullish", "neutral")).tolist()
         
@@ -97,6 +98,7 @@ def sentiment_analyst_agent(state: AgentState, agent_id: str = "sentiment_analys
                     "bullish_articles": news_signals.count("bullish"),
                     "bearish_articles": news_signals.count("bearish"),
                     "neutral_articles": news_signals.count("neutral"),
+                    "unscored_articles": unscored_articles,
                     "weight": news_weight,
                     "weighted_bullish": round(news_signals.count("bullish") * news_weight, 1),
                     "weighted_bearish": round(news_signals.count("bearish") * news_weight, 1),

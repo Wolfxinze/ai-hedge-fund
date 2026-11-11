@@ -282,8 +282,8 @@ def analyze_margin_trends(metrics: list) -> dict:
 def analyze_insider_conviction(trades: list) -> dict:
     """Analyzes insider trading activity."""
     
-    buys = sum(t.transaction_value for t in trades if t.transaction_value and t.transaction_shares > 0)
-    sells = sum(abs(t.transaction_value) for t in trades if t.transaction_value and t.transaction_shares < 0)
+    buys = sum(t.transaction_value for t in trades if t.transaction_value and (t.transaction_shares or 0) > 0)
+    sells = sum(abs(t.transaction_value) for t in trades if t.transaction_value and (t.transaction_shares or 0) < 0)
     
     if (buys + sells) == 0:
         net_flow_ratio = 0
