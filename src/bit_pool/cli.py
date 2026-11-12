@@ -23,6 +23,9 @@ imported lazily so ``import src.bit_pool.cli`` and ``--help`` stay offline.
 or ``$MUSE_SIGNALS_PATH``) through the same flow — no LLM runs here. There is no
 default LLM provider/model: ``full`` requires both ``--provider`` and ``--model``.
 ``--label`` names the book (``real`` = owner's fills, ``muse`` = Muse's paper orders).
+
+``paper`` is a separate cash-seeded virtual book (``python -m src.bit_pool paper``).
+It never places orders. See ``src.bit_pool.paper_book``.
 """
 
 from __future__ import annotations
@@ -63,7 +66,7 @@ class _Parser(argparse.ArgumentParser):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="python -m src.bit_pool", description="Bit pool: research-only daily paper simulation of your holdings. Never places orders.")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True, parser_class=_Parser)
     run = sub.add_parser("run", help="simulate one day and write <out>/<date>.json + .md")
     run.add_argument("--date", default=None, help="as-of date YYYY-MM-DD, not in the future (default: today, local date); run after the US close")
     run.add_argument("--holdings", default=None, help="holdings CSV (default: $BIT_POOL_PATH or data/pools/bit_pool.csv under the repo root)")
@@ -75,6 +78,36 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--label", default=DEFAULT_LABEL, help=f"book name, ^[a-z0-9_-]{{1,32}}$ (default: {DEFAULT_LABEL}); e.g. real = owner's fills, muse = Muse's paper orders")
     run.add_argument("--max-weight", type=float, default=None, metavar="PCT", help="policy alert OVER_WEIGHT when a priced position exceeds PCT%% of equity (positions + cash), PCT in (0, 100]; default: off. Never changes the exit code")
     run.add_argument("--out", default=DEFAULT_OUT, help=f"output directory (default: {DEFAULT_OUT})")
+    paper = sub.add_parser(
+        "paper",
+        help="cash-seeded virtual paper book (research-only; never places orders)",
+        description="Cash-seeded virtual paper book. Research only; never places orders. No broker, no shorts, no leverage.",
+    )
+    paper.add_argument("--config", default=None, help="JSON config; flags override it. Non-secret. See data/pools/paper_book.example.json")
+    paper.add_argument("--cash", type=float, default=None, help="initial virtual USD cash (default: 50000)")
+    paper.add_argument("--tickers", default=None, help="comma-separated US tickers (default: AAPL,MSFT,NVDA)")
+    paper.add_argument("--benchmark", default=None, help="benchmark ticker for a price return, not a portfolio (default: SPY)")
+    paper.add_argument("--start", default=None, help="window start YYYY-MM-DD")
+    paper.add_argument("--end", default=None, help="window end YYYY-MM-DD, not in the future")
+    paper.add_argument("--decision", choices=("equal_weight", "technical"), default=None, help="equal_weight = deterministic plumbing; technical = LLM-free technical analyst, next-session fill")
+    paper.add_argument("--rebalance", choices=("once", "weekly"), default=None, help="default: once for equal_weight, weekly for technical")
+    paper.add_argument("--commission-bps", type=float, default=None, dest="commission_bps", help="commission in basis points of fill notional (default: 5, max 100)")
+    paper.add_argument("--slippage-bps", type=float, default=None, dest="slippage_bps", help="slippage in basis points versus the close (default: 5, max 100)")
+    paper.add_argument("--label", default=None, help="book name ^[a-z0-9_-]{1,32}$ (default: verify)")
+    paper.add_argument("--out", required=True, help="output directory for summary.json, fills.csv, equity.csv, decisions.json, prices_used.csv")
+    paper.add_argument("--state", default=None, help="state JSON (default: <out>/state.json). A second run of the same window does not add fills")
+    paper.add_argument("--prices-csv", default=None, dest="prices_csv", help="date,ticker,close CSV instead of yfinance. Requires --data-label synthetic_fixture or supplied_prices")
+    paper.add_argument("--data-label", default=None, dest="data_label", choices=("synthetic_fixture", "supplied_prices", "yfinance_historical"), help="required with --prices-csv; yfinance_historical is the live default and cannot be used with a CSV")
+    paper.add_argument("--reset", action="store_true", help="delete the state file before running")
+    select = sub.add_parser(
+        "select",
+        help="rank the observing-pool seed and propose a virtual allocation (research-only; never places orders)",
+        description="Rank the repo seed universe from LLM-free analysts and real prices. Research only; never places orders. Does not fill the next session.",
+    )
+    select.add_argument("--universe", default="data/universes/ai_seed.csv", help="seed CSV (default: the observing-pool seed)")
+    select.add_argument("--cash", type=float, default=50000.0, help="virtual USD budget (default: 50000)")
+    select.add_argument("--as-of", default=None, help="YYYY-MM-DD upper bound. Default: last completed US session from SPY bars. A later date is an error.")
+    select.add_argument("--out", required=True, help="directory for pools.json, pools.csv, pools.md, proposed_orders.csv")
     return parser
 
 
@@ -249,6 +282,30 @@ def main(argv: list[str] | None = None) -> int:
         args = build_parser().parse_args(argv)
     except SystemExit as exc:  # --help exits 0; usage errors exit EXIT_ERROR via _Parser
         return int(exc.code or 0)
+    if args.command == "paper":
+        from src.bit_pool.paper_book import run_paper_cli
+
+        return run_paper_cli(args)
+    if args.command == "select":
+        from datetime import date as _date
+        from pathlib import Path
+
+        from src.bit_pool.pool_select import run_select
+
+        try:
+            requested = _date.fromisoformat(args.as_of) if args.as_of else None
+            payload = run_select(Path(args.out), universe=Path(args.universe), cash=float(args.cash), requested=requested)
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f"bit_pool select: error: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        print(Path(args.out) / "pools.md")
+        counts = payload["counts"]
+        print(
+            f"session={payload['session_as_of']} candidates={counts['candidate']} watch={counts['watch']} "
+            f"avoid={counts['avoid']} excluded={counts['excluded']} "
+            f"pending_orders={len(payload['allocation']['orders'])} cash_remaining={payload['allocation']['cash_remaining']:.2f} llm=false"
+        )
+        return EXIT_OK
     try:
         return _run(args)
     except (ValueError, OSError) as exc:

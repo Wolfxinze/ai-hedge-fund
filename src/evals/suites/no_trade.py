@@ -23,7 +23,7 @@ _SCANNED_MODULES = ("pipeline", "agents_bridge", "scoring", "classify", "scoring
 _SCANNED_QUANT_MODULES = ("volatility",)
 # The bit-pool paper simulator (the owner's real holdings) is research-only and must
 # never reach the trade graph either — same I1 boundary, third package tuple.
-_SCANNED_BIT_POOL_MODULES = ("holdings", "simulate", "report", "cli", "muse_bridge")
+_SCANNED_BIT_POOL_MODULES = ("holdings", "simulate", "report", "cli", "muse_bridge", "paper_book", "pool_select")
 # Direct imports of any of these in the scoring/classification modules would reopen
 # a path to the trade graph. The shared analyst registry (src/utils/analysts.py)
 # imports portfolio_manager, but these modules must not import it DIRECTLY.

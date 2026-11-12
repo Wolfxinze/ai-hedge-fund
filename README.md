@@ -196,6 +196,26 @@ Comparing the two books is how the system is verified. Muse's orders are simulat
 | `2` | degraded: some (not all) positions or committee tickers could not be priced/scored, or a `STALE` close |
 | `1` | error: bad CSV, oversell, trade on/before `baseline_date`, missing named trades ledger, future `--date`, bad arguments, a different book already in `--out`; also when **every** position or **every** committee ticker is degraded (systemic, e.g. the price provider is down; the report is still written) |
 
+### Cash-seeded virtual book (`paper`)
+
+The snapshot above marks a holdings file. Cash there starts at zero (sell proceeds minus buys). It does not start from a cash budget, and it does not turn a decision into a fill. `paper` is that separate virtual book. It is still research-only: no broker, no orders, no shorts, and no leverage.
+
+```bash
+python -m src.bit_pool paper --config data/pools/paper_book.example.json --out reports/paper_verify
+```
+
+Defaults when the flags are omitted from the config: **50,000 virtual USD**, tickers `AAPL,MSFT,NVDA`, benchmark `SPY`, **5 bps** commission and **5 bps** slippage versus the close, integer shares, long-only. `--decision equal_weight` buys toward equal weights on the first session and then holds (deterministic; not an AI decision). `--decision technical` calls the LLM-free technical analyst and fills on the **next** session close; bullish names share the equity and every other label stays in cash. No LLM is called. A price CSV requires `--data-label synthetic_fixture` or `supplied_prices` and cannot be labelled as a yfinance result.
+
+The window must end on or before today and span at most 370 days. Ending on today's US session before 16:15 America/New_York is refused, the same settled-close clock as the daily snapshot.
+
+### Seed ranking (`select`)
+
+`paper` replays a ticker list you already chose. `select` ranks the observing-pool seed (`data/universes/ai_seed.csv`) with the LLM-free analysts and writes `pools.json`, `pools.csv`, `pools.md`, and `proposed_orders.csv`. It does not call a model, does not place orders, and does not fill the next session. A requested date after the last completed SPY session is an error. The default date is that last session.
+
+```bash
+python -m src.bit_pool select --cash 50000 --out reports/pool_select
+``` State is `<out>/state.json`. Running the same window again adds no fills. A later `--end` on the same state continues the book. `--reset` deletes that state file. Exit `0` when the cash + holdings identity holds; exit `1` on error, an invariant failure, or a technical run whose every signal was missing. The summary's return and drawdown describe that replay only. They are not a forecast and not a guarantee.
+
 ## How to Install
 
 Before you can run Muse Hedge Lab, you'll need to install it and set up your API keys. These steps are common to both the full-stack web application and command line interface.
