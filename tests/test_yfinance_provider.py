@@ -370,3 +370,62 @@ def test_yfinance_insider_trades_filter_dates_before_limit(fake_provider):
 
     assert len(trades) == 1
     assert trades[0].name == "Jane Doe"
+
+
+def _insider_rows(*rows):
+    base = {"Start Date": "2024-12-15", "Insider": "Jane Doe", "Position": "CFO", "Transaction": ""}
+    return pd.DataFrame([{**base, **row} for row in rows])
+
+
+def test_yfinance_insider_sale_is_negative_shares(fake_provider):
+    """Yahoo reports every insider row with a positive share count and puts the
+    direction in the text. Consumers (sentiment, growth, Burry, ...) read the SIGN
+    of transaction_shares, so a sale that stays positive is counted as buying."""
+    provider, fake = fake_provider
+    fake.insider_transactions = _insider_rows(
+        {"Shares": 7305, "Value": 3976633, "Text": "Sale at price 544.24 - 544.95 per share."},
+        {"Shares": 100, "Value": 5000, "Text": "Purchase at price 50.00 per share."},
+    )
+
+    sale, purchase = provider.get_insider_trades("FAKE_SIGN", "2024-12-31", start_date="2024-12-01")
+
+    assert sale.transaction_shares == -7305
+    assert sale.transaction_value == 3976633
+    assert sale.transaction_price_per_share == pytest.approx(3976633 / 7305)
+    assert purchase.transaction_shares == 100
+
+
+def test_yfinance_insider_grants_and_gifts_carry_no_direction(fake_provider):
+    """A stock award or gift is not the insider betting their own money either
+    way; left positive it reads as a purchase and tilts every ticker bullish."""
+    provider, fake = fake_provider
+    fake.insider_transactions = _insider_rows(
+        {"Shares": 125, "Value": 0, "Text": "Stock Award(Grant) at price 0.00 per share."},
+        {"Shares": 4704, "Value": 0, "Text": "Stock Gift at price 0.00 per share."},
+        {"Shares": 900, "Value": 45000, "Text": "Conversion of Exercise of derivative security at price 50.00 per share."},
+    )
+
+    trades = provider.get_insider_trades("FAKE_NODIR", "2024-12-31", start_date="2024-12-01")
+
+    assert len(trades) == 3
+    assert [t.transaction_shares for t in trades] == [None, None, None]
+    assert trades[0].security_title.startswith("Stock Award")
+
+
+def test_yfinance_insider_direction_falls_back_to_transaction_column(fake_provider):
+    provider, _ = fake_provider  # default fixture row: Transaction "Sale", no Text
+
+    trades = provider.get_insider_trades("FAKE_TXCOL", "2024-12-31", start_date="2024-12-01")
+
+    assert trades[0].transaction_shares == -10.0
+
+
+def test_yfinance_insider_direction_ignores_missing_text(fake_provider):
+    """A missing Text cell arrives as NaN, which is truthy; it must not hide the
+    direction given in the Transaction column."""
+    provider, fake = fake_provider
+    fake.insider_transactions = _insider_rows({"Shares": 10.0, "Value": 1000.0, "Text": float("nan"), "Transaction": "Sale"})
+
+    trades = provider.get_insider_trades("FAKE_NANTEXT", "2024-12-31", start_date="2024-12-01")
+
+    assert trades[0].transaction_shares == -10.0
