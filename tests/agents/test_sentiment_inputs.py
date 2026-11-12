@@ -1,7 +1,10 @@
-"""The sentiment analyst must not call a ticker bullish on evidence that is not
-there: insider rows with no direction and news items with no sentiment label are
-"no evidence", and a ticker whose only directional insider activity is selling
-must not come out bullish."""
+"""How the sentiment analyst treats missing evidence: insider rows with no
+direction and news items with no sentiment label are "no evidence", and a ticker
+whose only directional insider activity is selling does not come out bullish.
+
+These pin the analyst's side of the contract. The bug that made every ticker
+bullish was in the yfinance provider (unsigned sales); the tests that fail
+without that fix are in tests/test_yfinance_provider.py."""
 
 from src.agents import sentiment as sentiment_module
 from src.data.models import CompanyNews, InsiderTrade

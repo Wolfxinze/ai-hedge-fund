@@ -131,6 +131,9 @@ def _insider_direction(row) -> int | None:
     Yahoo reports every insider row with a positive share count and describes the
     transaction in ``Text`` (``Transaction`` is usually blank). Awards, gifts and
     option exercises are not the insider buying or selling in the market.
+
+    This differs from the Financial Datasets provider, which reports grants and
+    exercises as positive share counts.
     """
     label = ""
     for column in ("Text", "Transaction"):
@@ -580,12 +583,12 @@ class YFinanceProvider(FinancialDataProvider):
         if cached_data := _cache.get_company_news(cache_key):
             return [CompanyNews(**news) for news in cached_data]
 
-        # yfinance raises a bare RuntimeError when Yahoo's news endpoint is down;
-        # that is a fetch failure. Only a missing package (raised by _ticker) stays
-        # a RuntimeError.
-        yf_ticker = self._ticker(ticker)
+        # A dead news endpoint is a fetch failure whatever yfinance raises for it
+        # (a bare RuntimeError in 0.2.x, YFDataException in 1.x). Only a missing
+        # package stays a RuntimeError.
+        self._yf()
         try:
-            items = yf_ticker.news or []
+            items = self._ticker(ticker).news or []
         except Exception as exc:
             raise ProviderFetchError(f"yfinance fetch failed for {ticker}") from exc
 

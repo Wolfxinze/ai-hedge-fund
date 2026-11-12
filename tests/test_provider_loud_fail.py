@@ -72,23 +72,43 @@ def test_all_yfinance_fetch_methods_raise_on_transport_failure(monkeypatch, call
         call(provider)
 
 
-class _YahooDownNewsTicker:
-    """yfinance raises a bare RuntimeError ("YAHOO! FINANCE IS CURRENTLY DOWN")
-    when the news endpoint answers with an error page."""
+def _yahoo_down_errors():
+    """What yfinance raises when the news endpoint answers with an error page:
+    a bare RuntimeError in 0.2.x, YFDataException in 1.x."""
+    from yfinance.exceptions import YFDataException
 
-    @property
-    def news(self):
-        raise RuntimeError("*** YAHOO! FINANCE IS CURRENTLY DOWN! ***")
+    message = "*** YAHOO! FINANCE IS CURRENTLY DOWN! ***"
+    return [RuntimeError(message), YFDataException(message)]
 
 
-def test_news_runtime_error_from_yahoo_is_a_fetch_error(monkeypatch):
+@pytest.mark.parametrize("error", _yahoo_down_errors(), ids=lambda e: type(e).__name__)
+def test_news_outage_from_yahoo_is_a_fetch_error(monkeypatch, error):
     """A dead news endpoint is a fetch failure: it must raise ProviderFetchError
-    so only the analyst that needs news degrades. As a bare RuntimeError it
-    escaped the analyst boundary and failed every ticker's whole committee."""
+    so only the analyst that needs news degrades. As a bare RuntimeError (0.2.x)
+    it escaped the analyst boundary and failed every ticker's whole committee."""
+
+    class _YahooDownNewsTicker:
+        @property
+        def news(self):
+            raise error
+
     provider = YFinanceProvider()
     monkeypatch.setattr(provider, "_ticker", lambda ticker: _YahooDownNewsTicker())
     with pytest.raises(ProviderFetchError):
         provider.get_company_news("DOWN_NEWS", "2024-02-01")
+
+
+def test_news_bad_ticker_is_a_fetch_error(monkeypatch):
+    """Building the Ticker can itself fail (yfinance 1.x rejects an empty symbol);
+    that must degrade one analyst like every other fetch method, not the run."""
+    provider = YFinanceProvider()
+
+    def _bad_ticker(ticker):
+        raise ValueError("Empty ticker name")
+
+    monkeypatch.setattr(provider, "_ticker", _bad_ticker)
+    with pytest.raises(ProviderFetchError):
+        provider.get_company_news("BAD_NEWS", "2024-02-01")
 
 
 def test_missing_yfinance_package_still_raises_runtime_error(monkeypatch):
